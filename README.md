@@ -1,12 +1,12 @@
-# Bitacora Trading
+# Trades-Journaling
 
 Genera un reporte HTML interactivo de performance a partir de tus archivos CSV de trading. Soporta multiples plataformas y brokers.
 
 ## Instalacion
 
 ```bash
-git clone https://github.com/MidgeTrader/bitacora-trading.git
-cd bitacora-trading
+git clone https://github.com/MidgeTrader/Trades-Journaling.git
+cd Trades-Journaling
 python3 setup.py
 ```
 
@@ -82,7 +82,7 @@ El reporte detecta el idioma de tu navegador. Para cambiar:
 ## Estructura del proyecto
 
 ```
-bitacora-trading/
+Trades-Journaling/
 ├── setup.py                  # Configuracion inicial interactiva
 ├── actualizar_reporte.py     # Unifica descarga + generacion + servidor
 ├── generate_report.py        # Genera el HTML con todas las metricas
