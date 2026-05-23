@@ -39,8 +39,81 @@ TOS_DIR = os.path.join(BASE_DIR, 'Reports_TOS')
 GENERIC_DIR = os.path.join(BASE_DIR, 'Reports_Generic')
 GASTOS_DIR = os.path.join(BASE_DIR, 'Reports_Gastos')
 SCREENSHOTS_DIR = os.path.join(BASE_DIR, 'Reports_Screenshots')
+DIARY_DIR = os.path.expanduser("~/Documents/2026/Diario de Trading")
 OUTPUT_FILE = os.path.join(BASE_DIR, 'trading_report.html')
 TAGS_FILE = os.path.join(BASE_DIR, 'tags.json')
+
+
+def md_to_html(md):
+    """Convierte markdown simple del diario de trading a HTML."""
+    lines = md.split('\n')
+    html_parts = []
+    in_list = False
+    for line in lines:
+        stripped = line.strip()
+        # Skip YAML frontmatter
+        if stripped == '---' and html_parts.count('---') < 2:
+            html_parts.append('---')
+            continue
+        if html_parts and html_parts[0] == '---':
+            if stripped == '---' and len(html_parts) > 1:
+                html_parts.append('---')
+                continue
+            if '---' in html_parts and html_parts[-1] != '---':
+                continue
+        # Headers
+        if stripped.startswith('## '):
+            if in_list:
+                html_parts.append('</ul>')
+                in_list = False
+            section = stripped[3:].strip()
+            html_parts.append(f'<h4 style="color:var(--accent-primary);margin:12px 0 6px 0;font-family:Orbitron,sans-serif;text-transform:uppercase;font-size:0.75rem;">{section}</h4>')
+            continue
+        if stripped.startswith('# '):
+            if in_list:
+                html_parts.append('</ul>')
+                in_list = False
+            html_parts.append(f'<h3 style="color:var(--text-primary);margin:0 0 8px 0;">{stripped[2:].strip()}</h3>')
+            continue
+        # List items
+        if stripped.startswith('- '):
+            if not in_list:
+                html_parts.append('<ul style="margin:4px 0;padding-left:16px;list-style:none;">')
+                in_list = True
+            item = stripped[2:].strip()
+            # Bold
+            item = re.sub(r'\*\*(.+?)\*\*', r'<strong>\1</strong>', item)
+            # Wikilinks [[TICKER]]
+            item = re.sub(r'\[\[(.+?)\]\]', r'<span style="color:var(--accent-primary);font-weight:bold;">\1</span>', item)
+            # Italic
+            item = re.sub(r'\*(.+?)\*', r'<em>\1</em>', item)
+            html_parts.append(f'<li style="margin:2px 0;color:var(--text-primary);font-size:0.85rem;line-height:1.5;">{item}</li>')
+            continue
+        # Empty line
+        if not stripped:
+            if in_list:
+                html_parts.append('</ul>')
+                in_list = False
+            continue
+        # Regular paragraph (after frontmatter)
+        if html_parts and '---' in html_parts and html_parts[-1] == '---':
+            html_parts.pop()  # Remove trailing ---
+            continue
+        if not stripped.startswith('-') and not stripped.startswith('#'):
+            if in_list:
+                html_parts.append('</ul>')
+                in_list = False
+            line_html = stripped
+            line_html = re.sub(r'\*\*(.+?)\*\*', r'<strong>\1</strong>', line_html)
+            line_html = re.sub(r'\[\[(.+?)\]\]', r'<span style="color:var(--accent-primary);font-weight:bold;">\1</span>', line_html)
+            line_html = re.sub(r'\*(.+?)\*', r'<em>\1</em>', line_html)
+            html_parts.append(f'<p style="margin:2px 0;color:var(--text-primary);font-size:0.85rem;line-height:1.5;">{line_html}</p>')
+    if in_list:
+        html_parts.append('</ul>')
+
+    # Remove YAML frontmatter lines
+    cleaned = [l for l in html_parts if l != '---']
+    return '\n'.join(cleaned).strip()
 
 
 def load_tags():
@@ -1318,6 +1391,34 @@ def generate_html_report(closed_trades, expenses_by_day):
             })
     screenshots_json = json.dumps(screenshots_data)
 
+    # --- Obsidian Journal Entries ---
+    journal_data = {}
+    if os.path.isdir(DIARY_DIR):
+        for month_folder in sorted(os.listdir(DIARY_DIR)):
+            month_path = os.path.join(DIARY_DIR, month_folder)
+            if not os.path.isdir(month_path):
+                continue
+            for fname in os.listdir(month_path):
+                if not fname.startswith("Trading_Diary_") or not fname.endswith(".md"):
+                    continue
+                # Parse date from filename: Trading_Diary_DD-MM-YYYY.md
+                parts = fname.replace("Trading_Diary_", "").replace(".md", "").split("-")
+                if len(parts) != 3:
+                    continue
+                day, month, year = parts
+                date_key = f"{year}-{month}-{day}"
+                fpath = os.path.join(month_path, fname)
+                try:
+                    with open(fpath, 'r', encoding='utf-8') as f:
+                        md_text = f.read()
+                except Exception:
+                    continue
+                # Convert markdown to basic HTML
+                html = md_to_html(md_text)
+                if html:
+                    journal_data[date_key] = html
+    journal_json = json.dumps(journal_data)
+
     monthly_data_json = json.dumps(monthly_pl)
     
     # Monthly Symbols & Context Stats
@@ -2034,6 +2135,14 @@ def generate_html_report(closed_trades, expenses_by_day):
                  </div>
             </div>
 
+            <!-- Journal Card -->
+            <div class="card" style="margin-bottom: 2rem;">
+                 <div class="card-title">Journal</div>
+                 <div id="dailyJournal">
+                     <div style="color: var(--text-secondary); font-size: 0.9rem;">Select a day to view journal entry</div>
+                 </div>
+            </div>
+
         </section>
 
         <!-- RATIOS VIEW -->
@@ -2246,6 +2355,7 @@ def generate_html_report(closed_trades, expenses_by_day):
             const dailyEquityData = {daily_equity_json};
             const dailyTags = {daily_tags_json};
             const dailyScreenshotsData = {screenshots_json};
+            const dailyJournalData = {journal_json};
 
             // --- i18n ---
             const savedLang = localStorage.getItem('lang');
@@ -3012,6 +3122,14 @@ def generate_html_report(closed_trades, expenses_by_day):
                             <div style="padding:4px 8px; font-size:0.75rem; color:var(--accent-primary); font-family:'Orbitron',sans-serif;">${{s.symbol || '??'}}</div>
                         </div>
                     `).join('');
+                }}
+                // Render journal entry for selected day
+                const journalContainer = document.getElementById('dailyJournal');
+                const journalEntry = dailyJournalData[selectedDayKey];
+                if (journalEntry) {{
+                    journalContainer.innerHTML = '<div style="font-size:0.85rem;line-height:1.6;">' + journalEntry + '</div>';
+                }} else {{
+                    journalContainer.innerHTML = '<div style="color:var(--text-secondary);font-size:0.9rem;">No journal entry for this day</div>';
                 }}
                 if(!data) {{ pnlEl.innerText = '-'; commEl.innerText = '-'; return; }}
                 pnlEl.innerText = '$' + data.pnl.toLocaleString(undefined, {{minimumFractionDigits: 2, maximumFractionDigits: 2}});
