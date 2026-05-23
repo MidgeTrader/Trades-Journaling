@@ -9,6 +9,7 @@ Uso:
   python3 actualizar_reporte.py --all           # Descarga todos los meses historicos
   python3 actualizar_reporte.py YYYY-MM         # Solo un mes especifico
   python3 actualizar_reporte.py --serve         # Modo servidor local (tags auto-save)
+  python3 actualizar_reporte.py --no-sync       # Saltea sincronizacion de capturas (rclone)
 """
 
 import os
@@ -76,10 +77,31 @@ def run_server(port=8765):
         server.shutdown()
 
 
+SYNC_SCREENSHOTS = os.path.join(SCRIPT_DIR, "sync_screenshots.sh")
+
+
+def sync_screenshots():
+    """Sincroniza capturas desde Google Drive via rclone."""
+    print("=" * 60)
+    print("Sincronizando capturas de pantalla desde Google Drive...")
+    print("=" * 60)
+    result = subprocess.run(["bash", SYNC_SCREENSHOTS], cwd=SCRIPT_DIR)
+    if result.returncode != 0:
+        print("  [WARN] Fallo sincronizacion de capturas (puede continuar igual)")
+    else:
+        print("  Capturas sincronizadas OK.")
+    print()
+
+
 def main():
     no_browser = "--no-browser" in sys.argv
     serve_mode = "--no-serve" not in sys.argv  # Serve es default
-    args = [a for a in sys.argv[1:] if a not in ("--no-browser", "--no-serve", "--serve")]
+    skip_sync = "--no-sync" in sys.argv
+    args = [a for a in sys.argv[1:] if a not in ("--no-browser", "--no-serve", "--serve", "--no-sync")]
+
+    # Paso 0: Sincronizar capturas
+    if not skip_sync:
+        sync_screenshots()
 
     # Paso 1: Descargar
     print("=" * 60)

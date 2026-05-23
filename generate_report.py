@@ -7,6 +7,7 @@ import os
 import math
 import stat
 import base64
+import re
 
 # Cargar .env si existe
 def _load_env():
@@ -37,6 +38,7 @@ DAS_DIR = os.path.join(BASE_DIR, 'Reports_DAS')
 TOS_DIR = os.path.join(BASE_DIR, 'Reports_TOS')
 GENERIC_DIR = os.path.join(BASE_DIR, 'Reports_Generic')
 GASTOS_DIR = os.path.join(BASE_DIR, 'Reports_Gastos')
+SCREENSHOTS_DIR = os.path.join(BASE_DIR, 'Reports_Screenshots')
 OUTPUT_FILE = os.path.join(BASE_DIR, 'trading_report.html')
 TAGS_FILE = os.path.join(BASE_DIR, 'tags.json')
 
@@ -317,7 +319,7 @@ def process_alaric_trades(filepath):
                     except: return 0.0
                 
                 fees = 0.0
-                fee_cols = ['Comm', 'Ecn Fee', 'SECTAF', 'NSCC', 'CL', 'ROR', 'FPT', 'FPF', 'EFT', 'TTC']
+                fee_cols = ['Comm', 'Ecn Fee', 'SECTAF', 'NSCC', 'CL']
                 for col in fee_cols:
                     fees += abs(get_val(col)) # Fees are often negative in this CSV, we want the magnitude
                 
@@ -1293,6 +1295,29 @@ def generate_html_report(closed_trades, expenses_by_day):
     monthly_equity_json = json.dumps(monthly_equity_curves)
     daily_equity_json = json.dumps(daily_equity_curves)
     daily_data_json = json.dumps(daily_stats)
+
+    # --- Screenshots (Capturas de trades) ---
+    screenshots_data = {}
+    if os.path.isdir(SCREENSHOTS_DIR):
+        date_pat = re.compile(r'(\d{4})-(\d{2})-(\d{2})')
+        for fname in os.listdir(SCREENSHOTS_DIR):
+            fpath = os.path.join(SCREENSHOTS_DIR, fname)
+            if not os.path.isfile(fpath):
+                continue
+            m = date_pat.search(fname)
+            if not m:
+                continue
+            date_str = f"{m.group(1)}-{m.group(2)}-{m.group(3)}"
+            # Extract probable ticker from text before date
+            prefix = fname[:m.start()].strip().rstrip('_- ')
+            words = re.findall(r'\b[A-Za-z]{1,5}\b', prefix)
+            symbol = words[-1].upper() if words else ""
+            screenshots_data.setdefault(date_str, []).append({
+                'symbol': symbol,
+                'file': fname
+            })
+    screenshots_json = json.dumps(screenshots_data)
+
     monthly_data_json = json.dumps(monthly_pl)
     
     # Monthly Symbols & Context Stats
@@ -2000,6 +2025,15 @@ def generate_html_report(closed_trades, expenses_by_day):
                      </div>
                  </div>
             </div>
+
+            <!-- Screenshots Card -->
+            <div class="card" style="margin-bottom: 2rem;">
+                 <div class="card-title">Screenshots</div>
+                 <div id="dailyScreenshots" style="display: grid; grid-template-columns: repeat(auto-fill, minmax(180px, 1fr)); gap: 1rem;">
+                     <div style="color: var(--text-secondary); font-size: 0.9rem;" id="dailyScreenshotsPlaceholder">Select a day to view screenshots</div>
+                 </div>
+            </div>
+
         </section>
 
         <!-- RATIOS VIEW -->
@@ -2211,6 +2245,7 @@ def generate_html_report(closed_trades, expenses_by_day):
             const monthlyEquityData = {monthly_equity_json};
             const dailyEquityData = {daily_equity_json};
             const dailyTags = {daily_tags_json};
+            const dailyScreenshotsData = {screenshots_json};
 
             // --- i18n ---
             const savedLang = localStorage.getItem('lang');
@@ -2965,6 +3000,19 @@ def generate_html_report(closed_trades, expenses_by_day):
                 if(!selectedDayKey) {{ header.innerText = t('selectDayCalendar'); return; }}
                 const data = dailyData[selectedDayKey];
                 header.innerText = selectedDayKey;
+                // Render screenshots for selected day
+                const ssContainer = document.getElementById('dailyScreenshots');
+                const ssData = dailyScreenshotsData[selectedDayKey] || [];
+                if (ssData.length === 0) {{
+                    ssContainer.innerHTML = '<div style="color:var(--text-secondary);font-size:0.9rem;">No screenshots for this day</div>';
+                }} else {{
+                    ssContainer.innerHTML = ssData.map(s => `
+                        <div style="cursor:pointer; border:1px solid var(--border-color); border-radius:8px; overflow:hidden; background:var(--card-bg); transition:border-color 0.2s;" onmouseover="this.style.borderColor='var(--accent-primary)'" onmouseout="this.style.borderColor='var(--border-color)'" onclick="window.open('Reports_Screenshots/${{encodeURIComponent(s.file)}}', '_blank', 'width=1400,height=900,menubar=no,toolbar=no,location=no,status=no')">
+                            <img src="Reports_Screenshots/${{encodeURIComponent(s.file)}}" loading="lazy" style="width:100%; height:120px; object-fit:cover; display:block;">
+                            <div style="padding:4px 8px; font-size:0.75rem; color:var(--accent-primary); font-family:'Orbitron',sans-serif;">${{s.symbol || '??'}}</div>
+                        </div>
+                    `).join('');
+                }}
                 if(!data) {{ pnlEl.innerText = '-'; commEl.innerText = '-'; return; }}
                 pnlEl.innerText = '$' + data.pnl.toLocaleString(undefined, {{minimumFractionDigits: 2, maximumFractionDigits: 2}});
                 pnlEl.className = data.pnl >= 0 ? "card-value positive" : "card-value negative";
@@ -3019,6 +3067,7 @@ def generate_html_report(closed_trades, expenses_by_day):
                     tbody.appendChild(row);
                 }});
                 if (typeof Chart !== 'undefined') renderDailyEquityChart(selectedDayKey);
+               
             }}
 
             function openTagModal(tradeId, symbol, dir, qty, entry, exit, pl) {{
