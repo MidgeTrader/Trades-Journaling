@@ -6,6 +6,10 @@ midge_logo.png
 logo.png
 
 # Datos de trading (sensibles)
+degiro_cusip_map.json
+trading_journal.parquet
+trading_journal.xlsx
+Historial_Degiro/
 Reports_PropReports/
 Reports_Gastos/
 Reports_Schwab/
@@ -17,6 +21,8 @@ Reports_Screenshots/
 
 # Archivos generados
 trading_report.html
+trading_report_backup_*.html
+transferencia_*.html
 tags.json
 __pycache__/
 *.pyc

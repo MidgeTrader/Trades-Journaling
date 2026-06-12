@@ -431,9 +431,9 @@ def _validate_symbol(symbol):
     if not symbol or not isinstance(symbol, str):
         return False
     symbol = symbol.strip()
-    if not symbol or len(symbol) > 20:
+    if not symbol or len(symbol) > 40:  # 40 allows option keys
         return False
-    # Must be mostly alphanumeric (allow dots for forex, hyphens for futures)
+    # Must be mostly alphanumeric (allow dots for forex/options, hyphens for futures)
     return all(c.isalnum() or c in '.-_' for c in symbol)
 
 
@@ -925,7 +925,7 @@ def process_gastos(filepath):
         print(f"Warning: Expenses file {filepath} not found.")
     return expense_items
 
-def generate_html_report(closed_trades, expenses_by_day):
+def generate_html_report(closed_trades, expenses_by_day, floating_positions=None):
     # --- Aggregation Helper ---
     def calculate_kpis(trade_list):
         if not trade_list:
@@ -1288,6 +1288,12 @@ def generate_html_report(closed_trades, expenses_by_day):
             }
     daily_tags_json = json.dumps(all_tags_data)
 
+    # Floating positions JSON
+    if floating_positions:
+        floating_json = json.dumps(floating_positions)
+    else:
+        floating_json = json.dumps({'total': 0, 'positions': []})
+
     # --- Daily Data Aggregation ---
     trades_by_day = collections.defaultdict(list)
     for t in closed_trades:
@@ -1338,22 +1344,28 @@ def generate_html_report(closed_trades, expenses_by_day):
     
     current_month_pl = collections.defaultdict(float)
     current_day_pl = collections.defaultdict(float)
-    
+    day_trade_idx = collections.defaultdict(int)
+
     # Needs chronological for equity curves
-    closed_trades.sort(key=lambda x: x.close_date) 
-    
+    closed_trades.sort(key=lambda x: x.close_date)
+
     for t in closed_trades:
         m_key = t.close_date.strftime('%Y-%m')
         d_key = t.close_date.strftime('%Y-%m-%d')
-        
+
         monthly_pl[m_key] += t.net_pl
-        
+
         current_month_pl[m_key] += t.net_pl
         monthly_equity_curves[m_key]['labels'].append(t.close_date.strftime('%d/%b'))
         monthly_equity_curves[m_key]['data'].append(round(current_month_pl[m_key], 2))
-        
+
         current_day_pl[d_key] += t.net_pl
-        daily_equity_curves[d_key]['labels'].append('')
+        day_trade_idx[d_key] += 1
+        if day_trade_idx[d_key] == 1:
+            label = t.open_date.strftime('%H:%M')
+        else:
+            label = t.close_date.strftime('%H:%M')
+        daily_equity_curves[d_key]['labels'].append(label)
         daily_equity_curves[d_key]['data'].append(round(current_day_pl[d_key], 2))
 
     # Incorporate expenses into Monthly PL and Monthly Equity
@@ -1913,6 +1925,7 @@ def generate_html_report(closed_trades, expenses_by_day):
         <button class="nav-btn" onclick="switchView('monthly')" id="btn-monthly">Calendar</button>
         <button class="nav-btn" onclick="switchView('daily')" id="btn-daily">Daily details</button>
         <button class="nav-btn" onclick="switchView('ratios')" id="btn-ratios">Metricas</button>
+        <button class="nav-btn" onclick="switchView('floating')" id="btn-floating">&#x1F4CB; Flotante</button>
         <button class="nav-btn" onclick="switchView('buildReport')" id="btn-buildReport">&#x1F4CA; Build Report</button>
     </aside>
 
@@ -2154,6 +2167,42 @@ def generate_html_report(closed_trades, expenses_by_day):
             <div class="grid" id="ratiosGrid" style="grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));"></div>
         </section>
 
+        <!-- FLOATING VIEW -->
+        <section id="floatingView" class="view-section">
+            <div class="calendar-header"><h1>Largo Plazo</h1></div>
+            <p style="color:var(--text-secondary); margin-bottom:1.5rem;">
+                Compras abiertas a largo plazo en IBKR (ETFs). No afectan los resultados de trading.
+            </p>
+            <div class="grid">
+                <div class="card">
+                    <div class="card-title">Total Invertido</div>
+                    <div class="card-value" id="floating_total">-</div>
+                </div>
+                <div class="card">
+                    <div class="card-title">Compras</div>
+                    <div class="card-value" id="floating_count">-</div>
+                </div>
+            </div>
+            <div class="card">
+                <div class="card-title">Detalle por Compra</div>
+                <div style="overflow-x: auto;">
+                    <table>
+                        <thead>
+                            <tr><th>Símbolo</th><th>Fecha Compra</th><th>Cantidad</th><th>Precio</th><th>Invertido</th></tr>
+                        </thead>
+                        <tbody id="floatingTableBody"></tbody>
+                    </table>
+                </div>
+            </div>
+            <div class="card" style="margin-top:1rem;">
+                <div class="card-title" style="color:var(--text-secondary);">Nota</div>
+                <p style="color:var(--text-secondary); font-size:0.85rem;">
+                    Estas posiciones no están incluidas en las métricas de trading (P&L, Profit Factor, etc.)
+                    porque son inversiones a largo plazo, no trades activos.
+                </p>
+            </div>
+        </section>
+
         <!-- BUILD REPORT VIEW -->
         <section id="buildReportView" class="view-section">
             <div class="build-report-layout">
@@ -2344,6 +2393,7 @@ def generate_html_report(closed_trades, expenses_by_day):
     <script>
         const annualStats = {annual_stats_json};
             const annualCharts = {annual_charts_json};
+        const floatingPos = {floating_json};
             const availableYears = {available_years_json};
             
             const dailyData = {daily_data_json};
@@ -2822,6 +2872,7 @@ def generate_html_report(closed_trades, expenses_by_day):
                 if (viewName === 'monthly') renderCalendar();
                 if (viewName === 'daily') renderDaily();
                 if (viewName === 'ratios') renderRatios();
+                if (viewName === 'floating') renderFloating();
                 if (viewName === 'buildReport') renderBuildReport();
             }}
             
@@ -3436,7 +3487,7 @@ def generate_html_report(closed_trades, expenses_by_day):
                 dailyChartInstance = new Chart(ctx, {{
                     type: 'line',
                     data: {{ labels: data.labels, datasets: [{{ label: 'Day Equity', data: data.data, borderColor: '#a855f7', backgroundColor: 'rgba(168, 85, 247, 0.1)', borderWidth: 2, pointRadius: 2, fill: true, tension: 0.1 }}] }},
-                    options: {{ responsive: true, maintainAspectRatio: false, plugins: {{ legend: {{ display: false }} }}, scales: {{ x: {{ display:false }}, y: {{ grid: {{ color: '#334155' }}, ticks: {{ color: '#94a3b8' }} }} }} }} 
+                    options: {{ responsive: true, maintainAspectRatio: false, plugins: {{ legend: {{ display: false }} }}, scales: {{ x: {{ display:true, grid: {{ color: '#334155' }}, ticks: {{ color: '#94a3b8', maxRotation: 60, font: {{ size: 9 }} }} }}, y: {{ grid: {{ color: '#334155' }}, ticks: {{ color: '#94a3b8' }} }} }} }}
                 }});
             }}
 
@@ -3981,6 +4032,22 @@ def generate_html_report(closed_trades, expenses_by_day):
                 ct.innerHTML = h;
             }}
 
+            function renderFloating() {{
+                document.getElementById('floating_total').innerText = '$' + floatingPos.total.toLocaleString(undefined, {{minimumFractionDigits:2, maximumFractionDigits:2}});
+                document.getElementById('floating_count').innerText = 'COMPRAS ' + floatingPos.positions.length;
+                const tbody = document.getElementById('floatingTableBody');
+                tbody.innerHTML = '';
+                floatingPos.positions.forEach(p => {{
+                    const tr = document.createElement('tr');
+                    tr.innerHTML = '<td><strong style="color:var(--accent-primary);">' + p.symbol + '</strong></td>' +
+                        '<td style="color:var(--text-secondary);font-size:0.85rem;">' + (p.date || '-') + '</td>' +
+                        '<td>' + p.qty + '</td>' +
+                        '<td>$' + p.price.toFixed(2) + '</td>' +
+                        '<td style="color:var(--accent-blue);">$' + p.invested.toFixed(2) + '</td>';
+                    tbody.appendChild(tr);
+                }});
+            }}
+
             function renderBuildReport() {{
                 if (!buildReportInitialized) {{
                     buildReportInitialized = true;
@@ -4111,6 +4178,129 @@ def generate_html_report(closed_trades, expenses_by_day):
 """
     return html
 
+def process_journal(filepath):
+    """Lee trading_journal.parquet y devuelve list[Trade] para Degiro + Tasty STOCK.
+
+    Usa Net_USD (ya convertido a dolares) como precio efectivo.
+    """
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+    DEGIRO_CUSIP_MAP_PATH = os.path.join(script_dir, 'degiro_cusip_map.json')
+    cusip_map = {}
+    if os.path.exists(DEGIRO_CUSIP_MAP_PATH):
+        with open(DEGIRO_CUSIP_MAP_PATH) as f:
+            cusip_map = json.load(f)
+
+    try:
+        import pandas as pd
+    except ImportError:
+        print("  ⚠️ pandas no instalado. Saltando journal.")
+        return []
+
+    try:
+        df = pd.read_parquet(filepath)
+    except Exception as e:
+        print(f"  ⚠️ Error leyendo {filepath}: {e}")
+        return []
+
+    trades = []
+    # Incluir Degiro + TODO Tastyworks (STOCK + OPTIONS), excluir ABIERTO
+    mask = (df['Broker'].isin(['Degiro', 'Tastyworks']))
+    # Excluir posiciones abiertas (no realizadas)
+    if 'Status' in df.columns:
+        mask = mask & (df['Status'] != 'ABIERTO')
+
+    # Helper para extraer clave de opcion: Symbol.Type.Exp.Strike
+    def option_key(desc_text, sym, opt_type):
+        """Extrae clave unica para opciones: SYM.TYPE.YYMMDD.STRIKE"""
+        if not desc_text or pd.isna(desc_text):
+            return sym
+        desc = str(desc_text).strip()
+        parts = desc.split()
+        if len(parts) >= 4:
+            opt_type_desc = parts[0].upper()
+            exp_str = parts[2]
+            strike = parts[3].split('.')[0]  # quitar decimales si son .0
+            try:
+                exp_date = datetime.datetime.strptime(exp_str, '%m/%d/%y')
+                exp_fmt = exp_date.strftime('%y%m%d')
+            except:
+                exp_fmt = exp_str.replace('/', '')
+            return f"{sym}.{opt_type_desc}.{exp_fmt}.{strike}"
+        return sym
+
+    for _, row in df[mask].iterrows():
+        try:
+            broker = row['Broker']
+            date_str = str(row['Date']).strip()
+            bs = str(row['B/S']).strip()
+            symbol = str(row['Symbol']).strip()
+            qty = float(row['Qty'])
+            price_orig = float(row['Price'])
+            net_usd = float(row['Net_USD'])
+
+            if not date_str or not bs or qty == 0:
+                continue
+
+            # Degiro usa qty negativa para sells
+            if qty < 0:
+                qty = abs(qty)
+
+            # Parse date
+            date = None
+            for fmt in ('%Y-%m-%d', '%m/%d/%Y', '%m/%d/%y', '%d/%m/%Y'):
+                try:
+                    date = datetime.datetime.strptime(date_str, fmt)
+                    break
+                except ValueError:
+                    continue
+            if not date:
+                continue
+
+            # Normalize action
+            action = bs.lower()
+            if action in ('b', 'buy'):
+                action = 'Buy'
+            elif action in ('s', 'sell'):
+                action = 'Sell'
+            else:
+                continue
+
+            # --- Degiro: mapear CUSIP -> ticker ---
+            if broker == 'Degiro':
+                ticker = cusip_map.get(symbol, symbol)
+                # USD stocks: usar Price directo (evita distorsion por FX de Degiro)
+                # Non-USD stocks: usar Net_USD/qty como precio efectivo convertido
+                is_us_stock = str(symbol).startswith('US')
+                if is_us_stock and price_orig > 0:
+                    eff_price = price_orig
+                else:
+                    eff_price = abs(net_usd) / qty if qty > 0 else price_orig
+                if _validate_symbol(ticker) and qty > 0 and eff_price > 0:
+                    trades.append(Trade(date, ticker, qty, eff_price, action, 0.0))
+
+            # --- Tastyworks STOCK + OPTIONS ---
+            elif broker == 'Tastyworks':
+                opt_type = str(row.get('Type', '') or '')
+                # Blank type = STOCK (datos sin clasificar en parquet)
+                if not opt_type:
+                    opt_type = 'STOCK'
+                # Para opciones: usar clave compuesta (Symbol|Type|Exp|Strike)
+                if opt_type in ('PUT', 'CALL'):
+                    desc_text = str(row.get('Desc', '') or '')
+                    match_key = option_key(desc_text, symbol, opt_type)
+                else:
+                    match_key = symbol
+                eff_price = abs(net_usd) / qty if qty > 0 else price_orig
+                if _validate_symbol(match_key) and qty > 0 and eff_price > 0:
+                    trades.append(Trade(date, match_key, qty, eff_price, action, 0.0))
+
+        except (ValueError, TypeError):
+            continue
+
+    print(f"  Generados {len(trades)} trades desde trading_journal.parquet")
+    return trades
+
+
 def main():
     # Helper to deduplicate items choosing the maximum count found in any single file
     def merge_item_counts(dir_path, process_func):
@@ -4148,7 +4338,18 @@ def main():
     closed_execution_trades = match_trades(all_executions)
     print(f"Generated {len(closed_execution_trades)} closed trades from executions.")
 
-    # 2. Process Alaric reports (from PropReports)
+    # 2. Process Historical Journal (trading_journal.parquet) — Degiro + Tasty STOCK
+    JOURNAL_PATH = os.path.join(BASE_DIR, 'trading_journal.parquet')
+    print("Processing Historical Journal (trading_journal.parquet)...")
+    journal_trades = []
+    if os.path.exists(JOURNAL_PATH):
+        journal_trades = process_journal(JOURNAL_PATH)
+    else:
+        print(f"  ⚠️ {JOURNAL_PATH} no encontrado, saltando.")
+    closed_journal_trades = match_trades(journal_trades)
+    print(f"Generated {len(closed_journal_trades)} closed trades from historical journal.")
+
+    # 3. Process Alaric reports (from PropReports)
     print("Processing Alaric reports...")
     all_alaric_trades = merge_item_counts(ALARIC_DIR, process_alaric_trades)
     print(f"Total deduplicated Alaric trades: {len(all_alaric_trades)}")
@@ -4184,7 +4385,8 @@ def main():
 
     # Combine all trades
     all_closed_trades = (closed_execution_trades + all_alaric_trades + all_mt_trades +
-                         closed_das_trades + closed_tos_trades + closed_generic_trades)
+                         closed_das_trades + closed_tos_trades + closed_generic_trades +
+                         closed_journal_trades)
     print(f"Total overall closed trades: {len(all_closed_trades)}")
 
     # Apply saved tags from tags.json
@@ -4216,7 +4418,30 @@ def main():
     print(f"Total expense days after deduplication: {len(expenses_data)}.")
 
     print("Generating report...")
-    html_content = generate_html_report(all_closed_trades, expenses_data)
+    # Cargar posiciones flotantes (abiertas) para mostrarlas aparte
+    JOURNAL_PATH = os.path.join(BASE_DIR, 'trading_journal.parquet')
+    floating_data = {'total': 0, 'positions': []}
+    if os.path.exists(JOURNAL_PATH):
+        try:
+            import pandas as _pd
+            _df = _pd.read_parquet(JOURNAL_PATH)
+            _open = _df[_df['Status'] == 'ABIERTO']
+            # Filtrar opciones o posiciones que parezcan opciones (VZIO symbol raro)
+            _open = _open[~_open['Symbol'].str.contains(r'[A-Z]+\s+\d+[CP]', na=False)]
+            if len(_open) > 0:
+                floating_data['total'] = _open['Net_USD'].abs().sum()
+                for _, r in _open.iterrows():
+                    floating_data['positions'].append({
+                        'symbol': r['Symbol'],
+                        'date': str(r['Date']),
+                        'qty': str(int(abs(float(r['Qty'])))),
+                        'price': round(float(r['Price']), 2),
+                        'invested': round(abs(float(r['Net_USD'])), 2)
+                    })
+        except Exception as e:
+            print(f"  ⚠️ Error cargando flotantes: {e}")
+
+    html_content = generate_html_report(all_closed_trades, expenses_data, floating_positions=floating_data)
     try:
         with open(OUTPUT_FILE, 'w', encoding='utf-8') as f:
             f.write(html_content)
