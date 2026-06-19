@@ -21,10 +21,10 @@ from http.server import HTTPServer, SimpleHTTPRequestHandler
 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 
-DOWNLOADER = os.path.join(SCRIPT_DIR, "download_alaric.py")
-GENERATOR = os.path.join(SCRIPT_DIR, "generate_report.py")
-REPORT_HTML = os.path.join(SCRIPT_DIR, "trading_report.html")
-TAGS_FILE = os.path.join(SCRIPT_DIR, "tags.json")
+DOWNLOADER = os.path.join(SCRIPT_DIR, "src", "download_alaric.py")
+GENERATOR = os.path.join(SCRIPT_DIR, "src", "generate_report.py")
+REPORT_HTML = os.path.join(SCRIPT_DIR, "data", "trading_report.html")
+TAGS_FILE = os.path.join(SCRIPT_DIR, "data", "tags.json")
 
 
 class TagServerHandler(SimpleHTTPRequestHandler):
@@ -64,20 +64,20 @@ class TagServerHandler(SimpleHTTPRequestHandler):
 
 def run_server(port=8765):
     """Inicia servidor HTTP local para auto-guardado de tags."""
-    print(f"\n  Servidor local: http://localhost:{port}/trading_report.html")
+    print(f"\n  Servidor local: http://localhost:{port}/data/trading_report.html")
     print(f"  Los tags se guardan automaticamente al pulsar 'Save Tags'.")
     print(f"  Presiona Ctrl+C para detener el servidor.\n")
 
     server = HTTPServer(('localhost', port), TagServerHandler)
     try:
-        webbrowser.open(f"http://localhost:{port}/trading_report.html")
+        webbrowser.open(f"http://localhost:{port}/data/trading_report.html")
         server.serve_forever()
     except KeyboardInterrupt:
         print("\nServidor detenido.")
         server.shutdown()
 
 
-SYNC_SCREENSHOTS = os.path.join(SCRIPT_DIR, "sync_screenshots.sh")
+SYNC_SCREENSHOTS = os.path.join(SCRIPT_DIR, "assets", "sync_screenshots.sh")
 
 
 def sync_screenshots():
@@ -137,7 +137,7 @@ def main():
         else:
             url = f"file://{REPORT_HTML}"
             print(f"\nAbriendo {url}...")
-            print("(Tags se guardan por descarga — usa modo normal para esto)")
+            print("(Tags se guardan en data/tags.json)")
             webbrowser.open(url)
 
     print("\nListo. Reporte actualizado.")
