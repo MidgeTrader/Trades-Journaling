@@ -9,7 +9,7 @@ import sys
 import stat
 from getpass import getpass
 
-SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+SCRIPT_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 ENV_PATH = os.path.join(SCRIPT_DIR, ".env")
 
 
@@ -77,7 +77,7 @@ def main():
     platform_dirs.append('Reports_Gastos')
 
     for d in platform_dirs:
-        dir_path = os.path.join(SCRIPT_DIR, d)
+        dir_path = os.path.join(SCRIPT_DIR, 'data', d)
         os.makedirs(dir_path, exist_ok=True)
         # Create example CSV in Generic folder
         if d == 'Reports_Generic':

@@ -21,7 +21,7 @@ BASE_URL = "https://alaric.propreports.com"
 
 # Cargar .env si existe
 def _load_env():
-    env_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".env")
+    env_path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), ".env")
     if os.path.exists(env_path):
         try:
             os.chmod(env_path, stat.S_IRUSR | stat.S_IWUSR)
@@ -40,13 +40,13 @@ USER = os.environ.get("PROPREPORTS_USER", "")
 PASSWORD = os.environ.get("PROPREPORTS_PASSWORD", "")
 GROUP_ID = os.environ.get("PROPREPORTS_GROUP_ID", "")
 ACCOUNT_ID = os.environ.get("PROPREPORTS_ACCOUNT_ID", "")
-OUTPUT_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "Reports_PropReports")
+OUTPUT_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "data", "Reports_PropReports")
 
 # Columnas que espera generate_report.py
 TARGET_HEADERS = [
     "Opened", "Closed", "Held", "Account", "Symbol", "Type", "CCY",
     "Entry", "Exit", "Qty", "Gross", "Comm", "Ecn Fee", "SECTAF",
-    "NSCC", "CL", "ROR", "FPT", "FPF", "EFT", "TTC", "ATNET", "TAG", "Weekday",
+    "NSCC", "CL", "TTC", "ATNET", "TAG", "Weekday",
 ]
 
 MESES_ES = [
@@ -206,7 +206,15 @@ def download_month(year, month):
 
             # TTC = total fees aproximado
             try:
-                ttc = sum(abs(float(x)) for x in [comm, ecn_fee, sec, clr, nscc, taf, nfa, orf, misc] if x and x.replace(".", "").replace("-", "").replace(".", "").isdigit())
+                # Normalize number string before float conversion
+                fees = []
+                for x in (comm, ecn_fee, sec, clr, nscc, taf, nfa, orf, misc):
+                    if not x:
+                        continue
+                    cleaned = x.replace(",", "").replace("-", "").strip()
+                    if cleaned.replace(".", "").isdigit():
+                        fees.append(abs(float(cleaned)))
+                ttc = sum(fees)
             except Exception:
                 ttc = ""
 
@@ -227,10 +235,6 @@ def download_month(year, month):
                 str(sectaf),     # SECTAF
                 nscc,            # NSCC
                 str(cl),         # CL
-                "",              # ROR
-                "",              # FPT
-                "",              # FPF
-                "",              # EFT
                 str(ttc),        # TTC
                 net_val,         # ATNET (After-Trade Net)
                 "",              # TAG
@@ -246,7 +250,7 @@ def download_month(year, month):
     return csv_path
 
 
-GASTOS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "Reports_Gastos")
+GASTOS_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "data", "Reports_Gastos")
 
 
 def download_ajustes(year, month):

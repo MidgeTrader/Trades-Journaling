@@ -2,7 +2,6 @@ import csv
 import collections
 import datetime
 import json
-import calendar
 import os
 import math
 import stat
@@ -11,7 +10,7 @@ import re
 
 # Cargar .env si existe
 def _load_env():
-    env_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".env")
+    env_path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), ".env")
     if os.path.exists(env_path):
         # Ensure restrictive permissions (owner read/write only)
         try:
@@ -27,21 +26,22 @@ def _load_env():
 
 _load_env()
 
-# Directory Configuration (Now dynamic based on script location)
-SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
-BASE_DIR = SCRIPT_DIR  # El script esta en la raiz del proyecto
+# Directory Configuration — SCRIPT_DIR apunta a la raiz del proyecto
+# (el script esta en src/, subimos un nivel)
+SCRIPT_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+BASE_DIR = SCRIPT_DIR
 
-SCHWAB_DIR = os.path.join(BASE_DIR, 'Reports_Schwab')
-ALARIC_DIR = os.path.join(BASE_DIR, 'Reports_PropReports')
-METATRADER_DIR = os.path.join(BASE_DIR, 'Reports_MetaTrader')
-DAS_DIR = os.path.join(BASE_DIR, 'Reports_DAS')
-TOS_DIR = os.path.join(BASE_DIR, 'Reports_TOS')
-GENERIC_DIR = os.path.join(BASE_DIR, 'Reports_Generic')
-GASTOS_DIR = os.path.join(BASE_DIR, 'Reports_Gastos')
-SCREENSHOTS_DIR = os.path.join(BASE_DIR, 'Reports_Screenshots')
+SCHWAB_DIR = os.path.join(BASE_DIR, 'data', 'Reports_Schwab')
+ALARIC_DIR = os.path.join(BASE_DIR, 'data', 'Reports_PropReports')
+METATRADER_DIR = os.path.join(BASE_DIR, 'data', 'Reports_MetaTrader')
+DAS_DIR = os.path.join(BASE_DIR, 'data', 'Reports_DAS')
+TOS_DIR = os.path.join(BASE_DIR, 'data', 'Reports_TOS')
+GENERIC_DIR = os.path.join(BASE_DIR, 'data', 'Reports_Generic')
+GASTOS_DIR = os.path.join(BASE_DIR, 'data', 'Reports_Gastos')
+SCREENSHOTS_DIR = os.path.join(BASE_DIR, 'data', 'Reports_Screenshots')
 DIARY_DIR = os.path.expanduser("~/Documents/2026/Diario de Trading")
-OUTPUT_FILE = os.path.join(BASE_DIR, 'trading_report.html')
-TAGS_FILE = os.path.join(BASE_DIR, 'tags.json')
+OUTPUT_FILE = os.path.join(BASE_DIR, 'data', 'trading_report.html')
+TAGS_FILE = os.path.join(BASE_DIR, 'data', 'tags.json')
 
 
 def md_to_html(md):
@@ -49,18 +49,17 @@ def md_to_html(md):
     lines = md.split('\n')
     html_parts = []
     in_list = False
+    in_frontmatter = False
     for line in lines:
         stripped = line.strip()
-        # Skip YAML frontmatter
-        if stripped == '---' and html_parts.count('---') < 2:
-            html_parts.append('---')
+        # Skip YAML frontmatter (--- ... ---) de Obsidian
+        if stripped == '---' and not in_frontmatter:
+            in_frontmatter = True
             continue
-        if html_parts and html_parts[0] == '---':
-            if stripped == '---' and len(html_parts) > 1:
-                html_parts.append('---')
-                continue
-            if '---' in html_parts and html_parts[-1] != '---':
-                continue
+        if in_frontmatter:
+            if stripped == '---':
+                in_frontmatter = False
+            continue
         # Headers
         if stripped.startswith('## '):
             if in_list:
@@ -125,12 +124,6 @@ def load_tags():
         except Exception:
             return {}
     return {}
-
-
-def save_tags(tags_dict):
-    """Guarda tags a tags.json."""
-    with open(TAGS_FILE, 'w', encoding='utf-8') as f:
-        json.dump(tags_dict, f, indent=2, ensure_ascii=False)
 
 
 def parse_currency(value):
@@ -251,6 +244,7 @@ class ClosedTrade:
         return {
             'symbol': self.symbol,
             'close_date': self.close_date.strftime('%Y-%m-%d'),
+            'open_date': self.open_date.strftime('%Y-%m-%d'),
             'type': self.direction,
             'quantity': self.quantity,
             'entry': self.entry_price,
@@ -324,7 +318,7 @@ def process_alaric_trades(filepath):
                 reader = csv.DictReader(f)
             else:
                 # Supply default headers if missing
-                fieldnames = ['Opened','Closed','Held','Account','Symbol','Type','CCY','Entry','Exit','Qty','Gross','Comm','Ecn Fee','SECTAF','NSCC','CL','ROR','FPT','FPF','EFT','TTC','ATNET','TAG','Weekday']
+                fieldnames = ['Opened','Closed','Held','Account','Symbol','Type','CCY','Entry','Exit','Qty','Gross','Comm','Ecn Fee','SECTAF','NSCC','CL','TTC','ATNET','TAG','Weekday']
                 reader = csv.DictReader(f, fieldnames=fieldnames)
                 
             # Normalize headers if needed, but assuming they are standard based on inspection
@@ -908,6 +902,10 @@ def process_gastos(filepath):
                     elif dt.year < 1900: # Handle cases where %y might be parsed weirdly depending on system
                         if dt.year < 70: dt = dt.replace(year=dt.year + 2000)
                         else: dt = dt.replace(year=dt.year + 1900)
+                    # Safety clamp: skip unreasonable years (e.g. 2106 from year 206)
+                    if dt.year < 2000 or dt.year > 2100:
+                        print(f"  Warning: Unreasonable year {dt.year} for '{date_str}' in {filepath}, skipping")
+                        continue
 
                     key = dt.strftime('%Y-%m-%d')
                     
@@ -1241,11 +1239,6 @@ def generate_html_report(closed_trades, expenses_by_day, floating_positions=None
     trades_by_year = collections.defaultdict(list)
     for t in closed_trades:
         trades_by_year[t.close_date.strftime('%Y')].append(t)
-        
-    # --- Annual Data Aggregation ---
-    trades_by_year = collections.defaultdict(list)
-    for t in closed_trades:
-        trades_by_year[t.close_date.strftime('%Y')].append(t)
 
     years = sorted(trades_by_year.keys())
 
@@ -1334,8 +1327,6 @@ def generate_html_report(closed_trades, expenses_by_day, floating_positions=None
             }
 
         daily_stats[d_key]['locates'] += cost
-        # Excluded from P&L per user request to avoid distorting charts
-        # daily_stats[d_key]['pnl'] -= cost 
 
     # Monthly/Daily Context (Equity Curves etc)
     monthly_pl = collections.defaultdict(float)
@@ -1367,15 +1358,6 @@ def generate_html_report(closed_trades, expenses_by_day, floating_positions=None
             label = t.close_date.strftime('%H:%M')
         daily_equity_curves[d_key]['labels'].append(label)
         daily_equity_curves[d_key]['data'].append(round(current_day_pl[d_key], 2))
-
-    # Incorporate expenses into Monthly PL and Monthly Equity
-    # Note: Equity curves above were built trade-by-trade. Expenses are day-level. 
-    # Ideally, we sort expenses and trades together. 
-    # Quick fix: Adjust monthly_pl sums. (Equity curves might slightly mismatch intraday if cost was 'at start', but acceptable).
-    # Excluded from P&L per user request to avoid distorting charts
-    # for d_key, cost in expenses_by_day.items():
-    #     m_key = d_key[:7] # YYYY-MM
-    #     monthly_pl[m_key] -= cost
 
     monthly_equity_json = json.dumps(monthly_equity_curves)
     daily_equity_json = json.dumps(daily_equity_curves)
@@ -1554,11 +1536,6 @@ def generate_html_report(closed_trades, expenses_by_day, floating_positions=None
             if date_str.startswith(m_key):
                 m_cost += cost
         
-        # Excluded from PL stats below to avoid distortion
-        # gl_stats['total_pl'] -= m_cost
-        # if gl_stats['count'] > 0:
-        #     gl_stats['avg_pl'] = gl_stats['total_pl'] / gl_stats['count']
-
         unique_days = set(t.close_date.date() for t in m_trades)
         traded_days_count = len(unique_days)
         # Avg Daily P&L now reflects only trading P&L
@@ -1588,12 +1565,24 @@ def generate_html_report(closed_trades, expenses_by_day, floating_positions=None
 
     # Embed logo as base64
     logo_b64 = ""
-    logo_path = os.environ.get("LOGO_PATH", os.path.join(os.path.dirname(__file__), "logo.png"))
-    try:
-        with open(logo_path, "rb") as lf:
-            logo_b64 = base64.b64encode(lf.read()).decode()
-    except FileNotFoundError:
-        pass
+    logo_env = os.environ.get("LOGO_PATH", "")
+    logo_path = ""
+    if logo_env:
+        # Try relative to project root, then assets/
+        for base in (SCRIPT_DIR, os.path.join(SCRIPT_DIR, "assets")):
+            candidate = os.path.join(base, logo_env)
+            if os.path.exists(candidate):
+                logo_path = candidate
+                break
+    else:
+        # Default fallback: assets/logo.png
+        logo_path = os.path.join(SCRIPT_DIR, "assets", "logo.png")
+    if logo_path:
+        try:
+            with open(logo_path, "rb") as lf:
+                logo_b64 = base64.b64encode(lf.read()).decode()
+        except FileNotFoundError:
+            pass
 
     # --- HTML Generator ---
 
@@ -3168,8 +3157,8 @@ def generate_html_report(closed_trades, expenses_by_day, floating_positions=None
                     ssContainer.innerHTML = '<div style="color:var(--text-secondary);font-size:0.9rem;">No screenshots for this day</div>';
                 }} else {{
                     ssContainer.innerHTML = ssData.map(s => `
-                        <div style="cursor:pointer; border:1px solid var(--border-color); border-radius:8px; overflow:hidden; background:var(--card-bg); transition:border-color 0.2s;" onmouseover="this.style.borderColor='var(--accent-primary)'" onmouseout="this.style.borderColor='var(--border-color)'" onclick="window.open('Reports_Screenshots/${{encodeURIComponent(s.file)}}', '_blank', 'width=1400,height=900,menubar=no,toolbar=no,location=no,status=no')">
-                            <img src="Reports_Screenshots/${{encodeURIComponent(s.file)}}" loading="lazy" style="width:100%; height:120px; object-fit:cover; display:block;">
+                        <div style="cursor:pointer; border:1px solid var(--border-color); border-radius:8px; overflow:hidden; background:var(--card-bg); transition:border-color 0.2s;" onmouseover="this.style.borderColor='var(--accent-primary)'" onmouseout="this.style.borderColor='var(--border-color)'" onclick="window.open('data/Reports_Screenshots/${{encodeURIComponent(s.file)}}', '_blank', 'width=1400,height=900,menubar=no,toolbar=no,location=no,status=no')">
+	                            <img src="data/Reports_Screenshots/${{encodeURIComponent(s.file)}}" loading="lazy" style="width:100%; height:120px; object-fit:cover; display:block;">
                             <div style="padding:4px 8px; font-size:0.75rem; color:var(--accent-primary); font-family:'Orbitron',sans-serif;">${{s.symbol || '??'}}</div>
                         </div>
                     `).join('');
@@ -3458,7 +3447,7 @@ def generate_html_report(closed_trades, expenses_by_day, floating_positions=None
                 a.download = 'tags.json';
                 a.click();
                 URL.revokeObjectURL(url);
-                showSaveToast('tags.json downloaded — place it in Reportes_Brokers/');
+                showSaveToast('tags.json downloaded — place it in data/');
             }}
 
             function showSaveToast(msg) {{
@@ -3519,8 +3508,6 @@ def generate_html_report(closed_trades, expenses_by_day, floating_positions=None
                 symbols.forEach(s => {{ const row = document.createElement('tr'); const plClass = s.pnl >= 0 ? 'positive' : 'negative'; row.innerHTML = `<td style="font-weight:bold; color:#60a5fa;">${{s.symbol}}</td><td>${{s.count}}</td><td class="${{plClass}}">$${{Math.abs(s.pnl).toLocaleString(undefined, {{minimumFractionDigits: 2, maximumFractionDigits: 2}})}}</td>`; tbody.appendChild(row); }});
             }}
 
-            function createEmptyCell() {{ const d=document.createElement('div'); d.className='day-cell empty'; return d; }}
-            
             function renderRatios() {{
                 const year = currentDate.getFullYear();
                 const month = currentDate.getMonth();
@@ -3869,7 +3856,12 @@ def generate_html_report(closed_trades, expenses_by_day, floating_positions=None
                 allTags.forEach(tag => {{
                     const opt = document.createElement('div');
                     opt.className = 'br-tag-option';
-                    opt.innerHTML = (brTags[group].includes(tag) ? '&#x2713; ' : '') + tag;
+                    if (brTags[group].includes(tag)) {{
+                        const check = document.createElement('span');
+                        check.innerHTML = '&#x2713; ';
+                        opt.appendChild(check);
+                    }}
+                    opt.appendChild(document.createTextNode(tag));
                     opt.onclick = (e) => {{ e.stopPropagation(); toggleTag(group, tag); }};
                     dd.appendChild(opt);
                 }});
@@ -3894,7 +3886,12 @@ def generate_html_report(closed_trades, expenses_by_day, floating_positions=None
                 sel.forEach(tag => {{
                     const chip = document.createElement('span');
                     chip.className = 'br-tag-chip';
-                    chip.innerHTML = tag + ' <span class="remove" onclick="event.stopPropagation(); toggleTag(\\'' + group + '\\',\\'' + tag + '\\')">&times;</span>';
+                    chip.textContent = tag;
+                    const remove = document.createElement('span');
+                    remove.className = 'remove';
+                    remove.innerHTML = '&times;';
+                    remove.onclick = (e) => {{ e.stopPropagation(); toggleTag(group, tag); }};
+                    chip.appendChild(remove);
                     chips.appendChild(chip);
                 }});
             }}
@@ -3922,8 +3919,8 @@ def generate_html_report(closed_trades, expenses_by_day, floating_positions=None
                     if (pf === 'winning' && t.pl <= 0) return false;
                     if (pf === 'losing' && t.pl >= 0) return false;
                     if (pf === 'breakeven' && Math.abs(t.pl) > 0.01) return false;
-                    if (dur === 'day' && t.close_date && t._date && t.close_date !== t._date) return false;
-                    if (dur === 'swing' && t.close_date && t._date && t.close_date === t._date) return false;
+                    if (dur === 'day' && t.close_date && t.open_date && t.close_date !== t.open_date) return false;
+                    if (dur === 'swing' && t.close_date && t.open_date && t.close_date === t.open_date) return false;
                     if (dr.start && dr.end) {{ const td = new Date(t._date); if (td < dr.start || td > dr.end) return false; }}
                     if (st.length) {{
                         const tt = new Set();
@@ -4183,8 +4180,8 @@ def process_journal(filepath):
 
     Usa Net_USD (ya convertido a dolares) como precio efectivo.
     """
-    script_dir = os.path.dirname(os.path.abspath(__file__))
-    DEGIRO_CUSIP_MAP_PATH = os.path.join(script_dir, 'degiro_cusip_map.json')
+    script_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    DEGIRO_CUSIP_MAP_PATH = os.path.join(script_dir, 'config', 'degiro_cusip_map.json')
     cusip_map = {}
     if os.path.exists(DEGIRO_CUSIP_MAP_PATH):
         with open(DEGIRO_CUSIP_MAP_PATH) as f:
@@ -4339,7 +4336,7 @@ def main():
     print(f"Generated {len(closed_execution_trades)} closed trades from executions.")
 
     # 2. Process Historical Journal (trading_journal.parquet) — Degiro + Tasty STOCK
-    JOURNAL_PATH = os.path.join(BASE_DIR, 'trading_journal.parquet')
+    JOURNAL_PATH = os.path.join(BASE_DIR, 'data', 'trading_journal.parquet')
     print("Processing Historical Journal (trading_journal.parquet)...")
     journal_trades = []
     if os.path.exists(JOURNAL_PATH):
@@ -4419,7 +4416,7 @@ def main():
 
     print("Generating report...")
     # Cargar posiciones flotantes (abiertas) para mostrarlas aparte
-    JOURNAL_PATH = os.path.join(BASE_DIR, 'trading_journal.parquet')
+    JOURNAL_PATH = os.path.join(BASE_DIR, 'data', 'trading_journal.parquet')
     floating_data = {'total': 0, 'positions': []}
     if os.path.exists(JOURNAL_PATH):
         try:
