@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-"""
-Descarga reportes de Alaric Securities desde PropReports.
+"""Descarga reportes de Alaric Securities desde PropReports.
+
 Genera CSVs mensuales en Reports_Alaric/ compatibles con generate_report.py.
 
 Uso:
@@ -9,82 +9,120 @@ Uso:
   python3 download_alaric.py --year 2025 # Todo un ano
 """
 
+import contextlib
+import os
+import sys
+import time
+from calendar import monthrange
+from datetime import datetime
+
 import requests
 import xlrd
-import os
-import stat
-import sys
-from datetime import datetime
-from calendar import monthrange
 
-BASE_URL = "https://alaric.propreports.com"
+from constants import (
+    ALARIC_DIR,
+    ALARIC_TARGET_HEADERS,
+    DEFAULT_HISTORICAL_YEARS,
+    DIAS_SEMANA,
+    ENV_FILE_PERMISSIONS,
+    ENV_PATH,
+    FMT_MDY,
+    FMT_MDY_HMS,
+    GASTOS_DIR,
+    MESES_ES,
+    PROPREPORTS_BASE_URL,
+    PROPREPORTS_LOGIN_BACKOFF,
+    PROPREPORTS_LOGIN_RETRIES,
+    PROPREPORTS_TIMEOUT,
+    PROPREPORTS_TIMEOUT_AJUSTES,
+)
+
 
 # Cargar .env si existe
-def _load_env():
-    env_path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), ".env")
-    if os.path.exists(env_path):
-        try:
-            os.chmod(env_path, stat.S_IRUSR | stat.S_IWUSR)
-        except Exception:
-            pass
-        with open(env_path) as f:
+def _load_env() -> None:
+    """Carga variables de entorno desde .env si existe."""
+    if os.path.exists(ENV_PATH):
+        with contextlib.suppress(OSError):
+            os.chmod(ENV_PATH, ENV_FILE_PERMISSIONS)
+        with open(ENV_PATH) as f:
             for line in f:
                 line = line.strip()
                 if line and not line.startswith("#") and "=" in line:
                     key, val = line.split("=", 1)
                     os.environ.setdefault(key.strip(), val.strip())
 
+
 _load_env()
 
-USER = os.environ.get("PROPREPORTS_USER", "")
-PASSWORD = os.environ.get("PROPREPORTS_PASSWORD", "")
-GROUP_ID = os.environ.get("PROPREPORTS_GROUP_ID", "")
-ACCOUNT_ID = os.environ.get("PROPREPORTS_ACCOUNT_ID", "")
-OUTPUT_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "data", "Reports_PropReports")
+USER = os.environ.get("PROPREPORTS_USER")
+PASSWORD = os.environ.get("PROPREPORTS_PASSWORD")
+GROUP_ID = os.environ.get("PROPREPORTS_GROUP_ID")
+ACCOUNT_ID = os.environ.get("PROPREPORTS_ACCOUNT_ID")
 
-# Columnas que espera generate_report.py
-TARGET_HEADERS = [
-    "Opened", "Closed", "Held", "Account", "Symbol", "Type", "CCY",
-    "Entry", "Exit", "Qty", "Gross", "Comm", "Ecn Fee", "SECTAF",
-    "NSCC", "CL", "TTC", "ATNET", "TAG", "Weekday",
+# Validación temprana: fallar alto si faltan credenciales
+_MISSING = [
+    k
+    for k, v in [
+        ("PROPREPORTS_USER", USER),
+        ("PROPREPORTS_PASSWORD", PASSWORD),
+        ("PROPREPORTS_GROUP_ID", GROUP_ID),
+        ("PROPREPORTS_ACCOUNT_ID", ACCOUNT_ID),
+    ]
+    if not v
 ]
-
-MESES_ES = [
-    "", "enero", "febrero", "marzo", "abril", "mayo", "junio",
-    "julio", "agosto", "septiembre", "octubre", "noviembre", "diciembre",
-]
-
-DIAS_SEMANA = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"]
+if _MISSING:
+    print(f"[ERROR] Variables de entorno faltantes: {', '.join(_MISSING)}")
+    print("  Ejecuta 'python3 src/setup.py' para configurar o crea un .env manualmente.")
+    sys.exit(1)
+OUTPUT_DIR = ALARIC_DIR
 
 session = requests.Session()
 
 
-def login():
-    print(f"Conectando a {BASE_URL}...")
-    for intento in range(1, 4):
+def login() -> bool:
+    """Autentica en PropReports.
+
+    Realiza hasta PROPREPORTS_LOGIN_RETRIES intentos de login con
+    backoff configurable entre reintentos.
+
+    Returns:
+        True si el login fue exitoso, False en caso contrario.
+    """
+    print(f"Conectando a {PROPREPORTS_BASE_URL}...")
+    for intento in range(1, PROPREPORTS_LOGIN_RETRIES + 1):
         try:
             r = session.post(
-                f"{BASE_URL}/login.php?forward=report.php&isEmbedded=0",
+                f"{PROPREPORTS_BASE_URL}/login.php?forward=report.php&isEmbedded=0",
                 data={"user": USER, "password": PASSWORD},
-                timeout=30,
+                timeout=PROPREPORTS_TIMEOUT,
             )
             if "Sign Out" in r.text:
                 print("Login exitoso")
                 return True
-            if intento < 3:
+            if intento < PROPREPORTS_LOGIN_RETRIES:
                 print(f"  Intento {intento} fallido, reintentando...")
-                import time
-                time.sleep(2 * intento)
-        except Exception as e:
+                time.sleep(PROPREPORTS_LOGIN_BACKOFF[intento - 1])
+        except requests.RequestException as e:
             print(f"  Error conexion (intento {intento}): {e}")
-            if intento < 3:
-                import time
-                time.sleep(3 * intento)
+            if intento < PROPREPORTS_LOGIN_RETRIES:
+                time.sleep(PROPREPORTS_LOGIN_BACKOFF[intento - 1])
     print("Login fallido tras 3 intentos")
     return False
 
 
-def fix_xls_bom(data):
+def fix_xls_bom(data: bytes) -> bytes:
+    """Corrige el BOM de archivos XLS exportados por PropReports.
+
+    PropReports exporta XLS con un byte-swapped BOM (0xFF 0xFE en
+    posiciones 28-29 en lugar de 0xFE 0xFF). Esta funcion lo revierte
+    para que xlrd pueda leerlo correctamente.
+
+    Args:
+        data: Contenido binario del archivo XLS.
+
+    Returns:
+        Datos con el BOM corregido.
+    """
     data = bytearray(data)
     if len(data) > 30 and data[28] == 0xFF and data[29] == 0xFE:
         data[28] = 0xFE
@@ -92,7 +130,16 @@ def fix_xls_bom(data):
     return bytes(data)
 
 
-def download_month(year, month):
+def download_month(year: int, month: int) -> str | None:
+    """Descarga trades de un mes desde PropReports y genera CSV.
+
+    Args:
+        year: Ano (ej. 2025).
+        month: Mes (1-12).
+
+    Returns:
+        Ruta al CSV generado, o None si no hay datos.
+    """
     last_day = monthrange(year, month)[1]
     start = f"{year:04d}-{month:02d}-01"
     end = f"{year:04d}-{month:02d}-{last_day:02d}"
@@ -100,7 +147,7 @@ def download_month(year, month):
     print(f"  {year}-{month:02d}: {start} -> {end}")
 
     url = (
-        f"{BASE_URL}/report.php"
+        f"{PROPREPORTS_BASE_URL}/report.php"
         f"?startDate={start}&endDate={end}"
         f"&groupId={GROUP_ID}&accountId={ACCOUNT_ID}"
         f"&reportName=trades&mode=1&baseCurrency=USD&export=1"
@@ -127,7 +174,17 @@ def download_month(year, month):
     xls_headers = [str(sheet.cell_value(1, c)).strip() for c in range(sheet.ncols)]
     col_idx = {h: i for i, h in enumerate(xls_headers)}
 
-    def get_xls(row_idx, names, default=""):
+    def get_xls(row_idx: int, names: str | list[str], default: str = "") -> str:
+        """Obtiene el valor de una celda del XLS por nombre(s) de columna.
+
+        Args:
+            row_idx: Indice de fila en la hoja.
+            names: Nombre(s) de columna a buscar.
+            default: Valor por defecto si no se encuentra.
+
+        Returns:
+            Valor de la celda como string.
+        """
         for name in names if isinstance(names, list) else [names]:
             if name in col_idx:
                 val = sheet.cell_value(row_idx, col_idx[name])
@@ -147,7 +204,7 @@ def download_month(year, month):
 
     rows_written = 0
     with open(csv_path, "w", encoding="utf-8") as f:
-        f.write(",".join(TARGET_HEADERS) + "\n")
+        f.write(",".join(ALARIC_TARGET_HEADERS) + "\n")
 
         for r in range(2, sheet.nrows):
             symbol = get_xls(r, ["Symbol"])
@@ -165,14 +222,14 @@ def download_month(year, month):
             weekday = ""
             if opened:
                 try:
-                    for fmt in ["%m/%d/%y %H:%M:%S", "%m/%d/%Y %H:%M:%S"]:
+                    for fmt in FMT_MDY_HMS:
                         try:
                             dt = datetime.strptime(opened, fmt)
                             weekday = DIAS_SEMANA[dt.weekday()]
                             break
                         except ValueError:
                             continue
-                except Exception:
+                except (ValueError, IndexError):
                     pass
 
             tipo = get_xls(r, "Type")
@@ -200,7 +257,9 @@ def download_month(year, month):
             # CL = CLR + NFA + ORF + MISC + CAT
             cat = get_xls(r, "CAT")
             try:
-                cl = sum(float(x) for x in [clr, nfa, orf, misc, cat] if x and x.replace(".", "").replace("-", "").isdigit())
+                cl = sum(
+                    float(x) for x in [clr, nfa, orf, misc, cat] if x and x.replace(".", "").replace("-", "").isdigit()
+                )
             except Exception:
                 cl = ""
 
@@ -219,26 +278,26 @@ def download_month(year, month):
                 ttc = ""
 
             row = [
-                opened,          # Opened
-                closed,          # Closed
-                held,            # Held
+                opened,  # Opened
+                closed,  # Closed
+                held,  # Held
                 USER,  # Account
-                symbol,          # Symbol
-                tipo,            # Type
-                "USD",           # CCY
-                entry,           # Entry
-                exit_px,         # Exit
-                qty,             # Qty
-                gross,           # Gross
-                comm,            # Comm
-                ecn_fee,         # Ecn Fee
-                str(sectaf),     # SECTAF
-                nscc,            # NSCC
-                str(cl),         # CL
-                str(ttc),        # TTC
-                net_val,         # ATNET (After-Trade Net)
-                "",              # TAG
-                weekday,         # Weekday
+                symbol,  # Symbol
+                tipo,  # Type
+                "USD",  # CCY
+                entry,  # Entry
+                exit_px,  # Exit
+                qty,  # Qty
+                gross,  # Gross
+                comm,  # Comm
+                ecn_fee,  # Ecn Fee
+                str(sectaf),  # SECTAF
+                nscc,  # NSCC
+                str(cl),  # CL
+                str(ttc),  # TTC
+                net_val,  # ATNET (After-Trade Net)
+                "",  # TAG
+                weekday,  # Weekday
             ]
 
             f.write(",".join(row) + "\n")
@@ -250,10 +309,16 @@ def download_month(year, month):
     return csv_path
 
 
-GASTOS_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "data", "Reports_Gastos")
+def download_ajustes(year: int, month: int) -> str | None:
+    """Descarga ajustes de un mes desde PropReports y genera CSV.
 
+    Args:
+        year: Ano (ej. 2025).
+        month: Mes (1-12).
 
-def download_ajustes(year, month):
+    Returns:
+        Ruta al CSV generado, o None si no hay datos.
+    """
     last_day = monthrange(year, month)[1]
     start = f"{year:04d}-{month:02d}-01"
     end = f"{year:04d}-{month:02d}-{last_day:02d}"
@@ -261,12 +326,12 @@ def download_ajustes(year, month):
     print(f"  Ajustes {year}-{month:02d}: {start} -> {end}")
 
     url = (
-        f"{BASE_URL}/report.php"
+        f"{PROPREPORTS_BASE_URL}/report.php"
         f"?reportName=adjustment&groupId={GROUP_ID}&accountId={ACCOUNT_ID}"
         f"&dateRange=custom&startDate={start}&endDate={end}&export=1"
     )
 
-    r = session.get(url, timeout=60)
+    r = session.get(url, timeout=PROPREPORTS_TIMEOUT_AJUSTES)
     if r.status_code != 200 or len(r.content) < 1000:
         print(f"    Sin ajustes ({len(r.content)} bytes)")
         return None
@@ -306,7 +371,7 @@ def download_ajustes(year, month):
             if isinstance(date_val, float) and date_val > 0:
                 try:
                     dt = xlrd.xldate_as_datetime(date_val, wb.datemode)
-                    date_str = dt.strftime("%m/%d/%Y")
+                    date_str = dt.strftime(FMT_MDY[0])
                 except Exception:
                     date_str = str(date_val)
             else:
@@ -324,19 +389,20 @@ def download_ajustes(year, month):
     return csv_path
 
 
-def main():
+def main() -> None:
+    """Punto de entrada: interpreta argumentos y orquesta descargas."""
     os.makedirs(OUTPUT_DIR, exist_ok=True)
 
     if not login():
         sys.exit(1)
 
-    months = []
+    months: list[tuple[int, int]] = []
     now = datetime.now()
 
     if len(sys.argv) > 1:
         arg = sys.argv[1]
         if arg == "--all":
-            for y in [2025, 2026]:
+            for y in DEFAULT_HISTORICAL_YEARS:
                 for m in range(1, 13):
                     if y == 2026 and m > now.month:
                         break
