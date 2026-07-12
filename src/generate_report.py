@@ -1,155 +1,221 @@
-import csv
+import base64
 import collections
+import contextlib
+import csv
 import datetime
 import json
-import os
 import math
-import stat
-import base64
+import os
 import re
 
+from constants import (
+    ALARIC_DIR,
+    ALARIC_FEE_COLS,
+    DAS_DIR,
+    DAS_FEE_COLS,
+    DATE_MAX,
+    DATE_MIN,
+    DIARY_DIR,
+    DIAS_SEMANA,
+    ENV_FILE_PERMISSIONS,
+    ENV_PATH,
+    GASTOS_DIR,
+    GENERIC_DIR,
+    METATRADER_DIR,
+    OUTPUT_FILE,
+    PRICE_MAX,
+    PRICE_MIN,
+    QTY_MAX,
+    QTY_MIN,
+    SCHWAB_DIR,
+    SCREENSHOTS_DIR,
+    SCRIPT_DIR,
+    SYMBOL_ALLOWED_CHARS,
+    SYMBOL_MAX_LEN,
+    TAGS_FILE,
+    TOS_DIR,
+    TOS_FEE_COLS,
+)
+
+BASE_DIR = SCRIPT_DIR
+
+
 # Cargar .env si existe
-def _load_env():
-    env_path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), ".env")
-    if os.path.exists(env_path):
+def _load_env() -> None:
+    """Carga variables de entorno desde .env si existe."""
+    if os.path.exists(ENV_PATH):
         # Ensure restrictive permissions (owner read/write only)
-        try:
-            os.chmod(env_path, stat.S_IRUSR | stat.S_IWUSR)
-        except Exception:
-            pass
-        with open(env_path) as f:
+        with contextlib.suppress(Exception):
+            os.chmod(ENV_PATH, ENV_FILE_PERMISSIONS)
+        with open(ENV_PATH) as f:
             for line in f:
                 line = line.strip()
                 if line and not line.startswith("#") and "=" in line:
                     key, val = line.split("=", 1)
                     os.environ.setdefault(key.strip(), val.strip())
 
+
 _load_env()
 
-# Directory Configuration — SCRIPT_DIR apunta a la raiz del proyecto
-# (el script esta en src/, subimos un nivel)
-SCRIPT_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-BASE_DIR = SCRIPT_DIR
 
-SCHWAB_DIR = os.path.join(BASE_DIR, 'data', 'Reports_Schwab')
-ALARIC_DIR = os.path.join(BASE_DIR, 'data', 'Reports_PropReports')
-METATRADER_DIR = os.path.join(BASE_DIR, 'data', 'Reports_MetaTrader')
-DAS_DIR = os.path.join(BASE_DIR, 'data', 'Reports_DAS')
-TOS_DIR = os.path.join(BASE_DIR, 'data', 'Reports_TOS')
-GENERIC_DIR = os.path.join(BASE_DIR, 'data', 'Reports_Generic')
-GASTOS_DIR = os.path.join(BASE_DIR, 'data', 'Reports_Gastos')
-SCREENSHOTS_DIR = os.path.join(BASE_DIR, 'data', 'Reports_Screenshots')
-DIARY_DIR = os.path.expanduser("~/Documents/2026/Diario de Trading")
-OUTPUT_FILE = os.path.join(BASE_DIR, 'data', 'trading_report.html')
-TAGS_FILE = os.path.join(BASE_DIR, 'data', 'tags.json')
+def md_to_html(md: str) -> str:
+    """Convierte markdown simple del diario de trading a HTML.
 
+    Args:
+        md: Texto en markdown simple (headers, listas, bold, wikilinks).
 
-def md_to_html(md):
-    """Convierte markdown simple del diario de trading a HTML."""
-    lines = md.split('\n')
+    Returns:
+        String HTML listo para incrustar en el reporte.
+    """
+    lines = md.split("\n")
     html_parts = []
     in_list = False
     in_frontmatter = False
     for line in lines:
         stripped = line.strip()
         # Skip YAML frontmatter (--- ... ---) de Obsidian
-        if stripped == '---' and not in_frontmatter:
+        if stripped == "---" and not in_frontmatter:
             in_frontmatter = True
             continue
         if in_frontmatter:
-            if stripped == '---':
+            if stripped == "---":
                 in_frontmatter = False
             continue
         # Headers
-        if stripped.startswith('## '):
+        if stripped.startswith("## "):
             if in_list:
-                html_parts.append('</ul>')
+                html_parts.append("</ul>")
                 in_list = False
             section = stripped[3:].strip()
-            html_parts.append(f'<h4 style="color:var(--accent-primary);margin:12px 0 6px 0;font-family:Orbitron,sans-serif;text-transform:uppercase;font-size:0.75rem;">{section}</h4>')
+            html_parts.append(
+                f'<h4 style="color:var(--accent-primary);margin:12px 0 6px 0;font-family:Orbitron,sans-serif;text-transform:uppercase;font-size:0.75rem;">{section}</h4>'
+            )
             continue
-        if stripped.startswith('# '):
+        if stripped.startswith("# "):
             if in_list:
-                html_parts.append('</ul>')
+                html_parts.append("</ul>")
                 in_list = False
             html_parts.append(f'<h3 style="color:var(--text-primary);margin:0 0 8px 0;">{stripped[2:].strip()}</h3>')
             continue
         # List items
-        if stripped.startswith('- '):
+        if stripped.startswith("- "):
             if not in_list:
                 html_parts.append('<ul style="margin:4px 0;padding-left:16px;list-style:none;">')
                 in_list = True
             item = stripped[2:].strip()
             # Bold
-            item = re.sub(r'\*\*(.+?)\*\*', r'<strong>\1</strong>', item)
+            item = re.sub(r"\*\*(.+?)\*\*", r"<strong>\1</strong>", item)
             # Wikilinks [[TICKER]]
-            item = re.sub(r'\[\[(.+?)\]\]', r'<span style="color:var(--accent-primary);font-weight:bold;">\1</span>', item)
+            item = re.sub(
+                r"\[\[(.+?)\]\]", r'<span style="color:var(--accent-primary);font-weight:bold;">\1</span>', item
+            )
             # Italic
-            item = re.sub(r'\*(.+?)\*', r'<em>\1</em>', item)
-            html_parts.append(f'<li style="margin:2px 0;color:var(--text-primary);font-size:0.85rem;line-height:1.5;">{item}</li>')
+            item = re.sub(r"\*(.+?)\*", r"<em>\1</em>", item)
+            html_parts.append(
+                f'<li style="margin:2px 0;color:var(--text-primary);font-size:0.85rem;line-height:1.5;">{item}</li>'
+            )
             continue
         # Empty line
         if not stripped:
             if in_list:
-                html_parts.append('</ul>')
+                html_parts.append("</ul>")
                 in_list = False
             continue
         # Regular paragraph (after frontmatter)
-        if html_parts and '---' in html_parts and html_parts[-1] == '---':
+        if html_parts and "---" in html_parts and html_parts[-1] == "---":
             html_parts.pop()  # Remove trailing ---
             continue
-        if not stripped.startswith('-') and not stripped.startswith('#'):
+        if not stripped.startswith("-") and not stripped.startswith("#"):
             if in_list:
-                html_parts.append('</ul>')
+                html_parts.append("</ul>")
                 in_list = False
             line_html = stripped
-            line_html = re.sub(r'\*\*(.+?)\*\*', r'<strong>\1</strong>', line_html)
-            line_html = re.sub(r'\[\[(.+?)\]\]', r'<span style="color:var(--accent-primary);font-weight:bold;">\1</span>', line_html)
-            line_html = re.sub(r'\*(.+?)\*', r'<em>\1</em>', line_html)
-            html_parts.append(f'<p style="margin:2px 0;color:var(--text-primary);font-size:0.85rem;line-height:1.5;">{line_html}</p>')
+            line_html = re.sub(r"\*\*(.+?)\*\*", r"<strong>\1</strong>", line_html)
+            line_html = re.sub(
+                r"\[\[(.+?)\]\]", r'<span style="color:var(--accent-primary);font-weight:bold;">\1</span>', line_html
+            )
+            line_html = re.sub(r"\*(.+?)\*", r"<em>\1</em>", line_html)
+            html_parts.append(
+                f'<p style="margin:2px 0;color:var(--text-primary);font-size:0.85rem;line-height:1.5;">{line_html}</p>'
+            )
     if in_list:
-        html_parts.append('</ul>')
+        html_parts.append("</ul>")
 
     # Remove YAML frontmatter lines
-    cleaned = [l for l in html_parts if l != '---']
-    return '\n'.join(cleaned).strip()
+    cleaned = [part for part in html_parts if part != "---"]
+    return "\n".join(cleaned).strip()
 
 
-def load_tags():
-    """Carga asignaciones de tags desde tags.json. Devuelve Dict[str, str]."""
+def load_tags() -> dict:
+    """Carga asignaciones de tags desde tags.json.
+
+    Returns:
+        Dict con trade_id -> tag_data. Dict vacio si el archivo no existe o hay error.
+    """
     if os.path.exists(TAGS_FILE):
         try:
-            with open(TAGS_FILE, 'r', encoding='utf-8') as f:
+            with open(TAGS_FILE, encoding="utf-8") as f:
                 return json.load(f)
         except Exception:
             return {}
     return {}
 
 
-def parse_currency(value):
-    if not value or value.strip() == '':
+def parse_currency(value: str | None) -> float:
+    """Convierte un string con formato monetario a float.
+
+    Args:
+        value: String con optional $ y commas, o None.
+
+    Returns:
+        Valor numerico. 0.0 si no se puede parsear.
+    """
+    if not value or value.strip() == "":
         return 0.0
-    clean_val = value.replace('$', '').replace(',', '')
+    clean_val = value.replace("$", "").replace(",", "")
     try:
         return float(clean_val)
     except ValueError:
         return 0.0
 
-def parse_date(date_str):
+
+def parse_date(date_str: str) -> datetime.datetime | None:
+    """Parsea una fecha en formato MM/DD/YYYY.
+
+    Args:
+        date_str: String fecha.
+
+    Returns:
+        Datetime o None si no se puede parsear.
+    """
     try:
-        return datetime.datetime.strptime(date_str, '%m/%d/%Y')
+        return datetime.datetime.strptime(date_str, "%m/%d/%Y")
     except ValueError:
         return None
 
-def parse_alaric_opened(date_str, weekday_str=''):
-    # Prueba formatos DD/MM y MM/DD. Si hay weekday, lo usa para validar.
+
+def parse_alaric_opened(date_str: str, weekday_str: str = "") -> datetime.datetime | None:
+    """Parsea la fecha de apertura de un trade Alaric.
+
+    Prueba formatos DD/MM y MM/DD. Si hay weekday, lo usa para validar.
+
+    Args:
+        date_str: String fecha/hora.
+        weekday_str: Nombre del dia en ingles para validacion (opcional).
+
+    Returns:
+        Datetime o None si no se puede parsear.
+    """
     all_formats = [
-        '%m/%d/%y %H:%M:%S', '%m/%d/%y', # MM/DD/YY (PropReports)
-        '%d/%m/%y %H:%M:%S', '%d/%m/%y', # DD/MM/YY
-        '%m/%d/%Y %H:%M:%S', '%m/%d/%Y', # MM/DD/YYYY
-        '%d/%m/%Y %H:%M:%S', '%d/%m/%Y', # DD/MM/YYYY
+        "%m/%d/%y %H:%M:%S",
+        "%m/%d/%y",  # MM/DD/YY (PropReports)
+        "%d/%m/%y %H:%M:%S",
+        "%d/%m/%y",  # DD/MM/YY
+        "%m/%d/%Y %H:%M:%S",
+        "%m/%d/%Y",  # MM/DD/YYYY
+        "%d/%m/%Y %H:%M:%S",
+        "%d/%m/%Y",  # DD/MM/YYYY
     ]
-    DIAS_SEMANA = ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday', 'Sunday']
     candidates = []
     for fmt in all_formats:
         try:
@@ -168,13 +234,29 @@ def parse_alaric_opened(date_str, weekday_str=''):
     # Sin weekday o sin coincidencia: DD/MM primero
     return candidates[0]
 
-def parse_alaric_closed_candidates(date_str):
-    # Returns a list of valid datetime interpretations
+
+def parse_alaric_closed_candidates(date_str: str) -> list[datetime.datetime]:
+    """Parsea una fecha de cierre probando multiples formatos.
+
+    Args:
+        date_str: String fecha/hora.
+
+    Returns:
+        Lista de interpretaciones validas (datetime). Vacia si no se puede parsear.
+    """
     candidates = []
-    formats = ['%m/%d/%y %H:%M:%S', '%m/%d/%y', '%d/%m/%y %H:%M:%S', '%d/%m/%y',
-               '%m/%d/%Y %H:%M:%S', '%m/%d/%Y', '%d/%m/%Y %H:%M:%S', '%d/%m/%Y']
+    formats = [
+        "%m/%d/%y %H:%M:%S",
+        "%m/%d/%y",
+        "%d/%m/%y %H:%M:%S",
+        "%d/%m/%y",
+        "%m/%d/%Y %H:%M:%S",
+        "%m/%d/%Y",
+        "%d/%m/%Y %H:%M:%S",
+        "%d/%m/%Y",
+    ]
     seen = set()
-    
+
     for fmt in formats:
         try:
             dt = datetime.datetime.strptime(date_str, fmt)
@@ -185,25 +267,55 @@ def parse_alaric_closed_candidates(date_str):
             continue
     return candidates
 
+
 class Trade:
-    def __init__(self, date, symbol, quantity, price, action, fees):
+    """Representa una ejecucion individual (no matched)."""
+
+    def __init__(
+        self, date: datetime.datetime, symbol: str, quantity: int, price: float, action: str, fees: float
+    ) -> None:
         self.date = date
         self.symbol = symbol
-        self.quantity = abs(int(quantity)) 
+        self.quantity = abs(int(quantity))
         self.price = price
-        self.action = action 
+        self.action = action
         self.fees = fees
 
-    def __eq__(self, other):
-        if not isinstance(other, Trade): return False
-        return (self.date, self.symbol, self.quantity, self.price, self.action, self.fees) == \
-               (other.date, other.symbol, other.quantity, other.price, other.action, other.fees)
+    def __eq__(self, other: object) -> bool:
+        if not isinstance(other, Trade):
+            return False
+        return (self.date, self.symbol, self.quantity, self.price, self.action, self.fees) == (
+            other.date,
+            other.symbol,
+            other.quantity,
+            other.price,
+            other.action,
+            other.fees,
+        )
 
-    def __hash__(self):
+    def __hash__(self) -> int:
         return hash((self.date, self.symbol, self.quantity, self.price, self.action, self.fees))
 
+
 class ClosedTrade:
-    def __init__(self, symbol, open_date, close_date, quantity, entry_price, exit_price, entry_fees, exit_fees, direction, tag='', entry_tag='', exit_tag='', note=''):
+    """Representa un trade cerrado con P&L calculado."""
+
+    def __init__(
+        self,
+        symbol: str,
+        open_date: datetime.datetime,
+        close_date: datetime.datetime,
+        quantity: int,
+        entry_price: float,
+        exit_price: float,
+        entry_fees: float,
+        exit_fees: float,
+        direction: str,
+        tag: str = "",
+        entry_tag: str = "",
+        exit_tag: str = "",
+        note: str = "",
+    ) -> None:
         self.symbol = symbol
         self.open_date = open_date
         self.close_date = close_date
@@ -218,79 +330,137 @@ class ClosedTrade:
         self.exit_tag = exit_tag
         self.note = note
 
-        cost_basis = (quantity * entry_price) 
-        proceeds = (quantity * exit_price)
-        
+        cost_basis = quantity * entry_price
+        proceeds = quantity * exit_price
+
         total_fees = entry_fees + exit_fees
-        
-        if direction == 'Long':
+
+        if direction == "Long":
             self.gross_pl = proceeds - cost_basis
         else:
             self.gross_pl = cost_basis - proceeds
-            
+
         self.net_pl = self.gross_pl - total_fees
         self.duration = (close_date - open_date).days
-        
+
         if cost_basis > 0:
             self.roi_pct = (self.net_pl / cost_basis) * 100
         else:
             self.roi_pct = 0.0
 
     @property
-    def trade_id(self):
+    def trade_id(self) -> str:
         return f"{self.symbol}|{self.open_date.strftime('%Y-%m-%d %H:%M:%S')}|{self.entry_price}|{self.exit_price}|{self.quantity}"
 
-    def to_dict(self):
+    def to_dict(self) -> dict:
         return {
-            'symbol': self.symbol,
-            'close_date': self.close_date.strftime('%Y-%m-%d'),
-            'open_date': self.open_date.strftime('%Y-%m-%d'),
-            'type': self.direction,
-            'quantity': self.quantity,
-            'entry': self.entry_price,
-            'exit': self.exit_price,
-            'pl': self.net_pl,
-            'tag': self.entry_tag or self.tag,
-            'entry_tag': self.entry_tag,
-            'exit_tag': self.exit_tag,
-            'note': self.note,
-            'trade_id': self.trade_id
+            "symbol": self.symbol,
+            "close_date": self.close_date.strftime("%Y-%m-%d"),
+            "open_date": self.open_date.strftime("%Y-%m-%d"),
+            "type": self.direction,
+            "quantity": self.quantity,
+            "entry": self.entry_price,
+            "exit": self.exit_price,
+            "pl": self.net_pl,
+            "tag": self.entry_tag or self.tag,
+            "entry_tag": self.entry_tag,
+            "exit_tag": self.exit_tag,
+            "note": self.note,
+            "trade_id": self.trade_id,
         }
 
-    def __eq__(self, other):
-        if not isinstance(other, ClosedTrade): return False
-        return (self.symbol, self.open_date, self.close_date, self.quantity, self.entry_price, self.exit_price, self.entry_fees, self.exit_fees, self.direction, self.tag, self.entry_tag, self.exit_tag, self.note) == \
-               (other.symbol, other.open_date, other.close_date, other.quantity, other.entry_price, other.exit_price, other.entry_fees, other.exit_fees, other.direction, other.tag, other.entry_tag, other.exit_tag, other.note)
+    def __eq__(self, other: object) -> bool:
+        if not isinstance(other, ClosedTrade):
+            return False
+        return (
+            self.symbol,
+            self.open_date,
+            self.close_date,
+            self.quantity,
+            self.entry_price,
+            self.exit_price,
+            self.entry_fees,
+            self.exit_fees,
+            self.direction,
+            self.tag,
+            self.entry_tag,
+            self.exit_tag,
+            self.note,
+        ) == (
+            other.symbol,
+            other.open_date,
+            other.close_date,
+            other.quantity,
+            other.entry_price,
+            other.exit_price,
+            other.entry_fees,
+            other.exit_fees,
+            other.direction,
+            other.tag,
+            other.entry_tag,
+            other.exit_tag,
+            other.note,
+        )
 
-    def __hash__(self):
-        return hash((self.symbol, self.open_date, self.close_date, self.quantity, self.entry_price, self.exit_price, self.entry_fees, self.exit_fees, self.direction, self.tag, self.entry_tag, self.exit_tag, self.note))
+    def __hash__(self) -> int:
+        return hash(
+            (
+                self.symbol,
+                self.open_date,
+                self.close_date,
+                self.quantity,
+                self.entry_price,
+                self.exit_price,
+                self.entry_fees,
+                self.exit_fees,
+                self.direction,
+                self.tag,
+                self.entry_tag,
+                self.exit_tag,
+                self.note,
+            )
+        )
 
-def process_execution_trades(filepath):
+
+def process_execution_trades(filepath: str) -> list[Trade]:
+    """Parsea ejecuciones Schwab desde CSV y devuelve lista de Trade.
+
+    Args:
+        filepath: Ruta al archivo CSV.
+
+    Returns:
+        Lista de Trade objects. Vacia si hay error.
+    """
     trades = []
     try:
-        with open(filepath, 'r', encoding='utf-8-sig') as f:
+        with open(filepath, encoding="utf-8-sig") as f:
             reader = csv.DictReader(f)
             reader.fieldnames = [name.strip() for name in reader.fieldnames]
             data_rows = list(reader)
             data_rows.reverse()
-            
-            for row in data_rows:
-                if row.get('Description', '').startswith('SCHWAB'): continue
-                if row.get('Action') not in ['Buy', 'Sell', 'Buy to Cover', 'Sell Short']: continue
 
-                date = parse_date(row['Date'])
-                if not date: continue
-                
-                symbol = row['Symbol']
-                qty_str = row['Quantity'].replace(',', '')
+            for row in data_rows:
+                if row.get("Description", "").startswith("SCHWAB"):
+                    continue
+                if row.get("Action") not in ["Buy", "Sell", "Buy to Cover", "Sell Short"]:
+                    continue
+
+                date = parse_date(row["Date"])
+                if not date:
+                    continue
+
+                symbol = row["Symbol"]
+                qty_str = row["Quantity"].replace(",", "")
                 qty = int(qty_str) if qty_str else 0
-                price = parse_currency(row['Price'])
-                fees = parse_currency(row.get('Fees & Comm', '0'))
-                
-                action = row['Action'].lower()
-                normalized_action = 'Buy'
-                if 'sell' in action: normalized_action = 'Sell'
-                elif 'buy' in action: normalized_action = 'Buy'
+                price = parse_currency(row["Price"])
+                fees = parse_currency(row.get("Fees & Comm", "0"))
+
+                action = row["Action"].lower()
+                normalized_action = "Buy"
+                if "sell" in action:
+                    normalized_action = "Sell"
+                elif "buy" in action:
+                    normalized_action = "Buy"
 
                 if not _validate_symbol(symbol) or not _validate_quantity(qty) or not _validate_price(price):
                     continue
@@ -298,45 +468,76 @@ def process_execution_trades(filepath):
                     continue
 
                 trades.append(Trade(date, symbol, qty, price, normalized_action, fees))
-                
+
     except Exception as e:
         print(f"Error reading CSV: {e}")
         return []
     return trades
 
-def process_alaric_trades(filepath):
+
+def process_alaric_trades(filepath: str) -> list[ClosedTrade]:
+    """Parsea trades de Alaric/PropReports desde CSV y devuelve lista de ClosedTrade.
+
+    Args:
+        filepath: Ruta al archivo CSV de PropReports.
+
+    Returns:
+        Lista de ClosedTrade objects. Vacia si hay error.
+    """
     trades = []
     try:
-        with open(filepath, 'r', encoding='utf-8-sig') as f:
+        with open(filepath, encoding="utf-8-sig") as f:
             # Check for header
             first_line = f.readline()
             f.seek(0)
-            
-            has_header = 'Opened' in first_line and 'Symbol' in first_line
-            
+
+            has_header = "Opened" in first_line and "Symbol" in first_line
+
             if has_header:
                 reader = csv.DictReader(f)
             else:
                 # Supply default headers if missing
-                fieldnames = ['Opened','Closed','Held','Account','Symbol','Type','CCY','Entry','Exit','Qty','Gross','Comm','Ecn Fee','SECTAF','NSCC','CL','TTC','ATNET','TAG','Weekday']
+                fieldnames = [
+                    "Opened",
+                    "Closed",
+                    "Held",
+                    "Account",
+                    "Symbol",
+                    "Type",
+                    "CCY",
+                    "Entry",
+                    "Exit",
+                    "Qty",
+                    "Gross",
+                    "Comm",
+                    "Ecn Fee",
+                    "SECTAF",
+                    "NSCC",
+                    "CL",
+                    "TTC",
+                    "ATNET",
+                    "TAG",
+                    "Weekday",
+                ]
                 reader = csv.DictReader(f, fieldnames=fieldnames)
-                
+
             # Normalize headers if needed, but assuming they are standard based on inspection
-            
+
             for row in reader:
-                if not row.get('Symbol'): continue
-                
+                if not row.get("Symbol"):
+                    continue
+
                 # Parse Dates
-                open_date = parse_alaric_opened(row.get('Opened', ''), row.get('Weekday', ''))
-                
+                open_date = parse_alaric_opened(row.get("Opened", ""), row.get("Weekday", ""))
+
                 # Smart Parse Closed Date
-                closed_raw = row.get('Closed', '').strip()
+                closed_raw = row.get("Closed", "").strip()
                 closed_candidates = parse_alaric_closed_candidates(closed_raw)
                 close_date = None
 
                 # PropReports exports Closed as HH:MM:SS when same day as Opened
                 if open_date and not closed_candidates and closed_raw:
-                    for time_fmt in ['%H:%M:%S', '%H:%M']:
+                    for time_fmt in ["%H:%M:%S", "%H:%M"]:
                         try:
                             t = datetime.datetime.strptime(closed_raw, time_fmt).time()
                             close_date = datetime.datetime.combine(open_date.date(), t)
@@ -352,45 +553,47 @@ def process_alaric_trades(filepath):
                     # Filter candidates that are BEFORE open_date (impossible) unless same day/time roughly
                     # Actually, just minimize abs(delta). Ideally close >= open.
                     valid_candidates = [c for c in closed_candidates if c >= open_date - datetime.timedelta(seconds=1)]
-                    if not valid_candidates: 
+                    if not valid_candidates:
                         # If all are before open, usually data error, but take closest anyway
                         valid_candidates = closed_candidates
-                        
+
                     close_date = min(valid_candidates, key=lambda x: abs(x - open_date))
                 elif closed_candidates:
-                    close_date = closed_candidates[0] # Fallback if no open date
+                    close_date = closed_candidates[0]  # Fallback if no open date
 
-                if not close_date: continue # Must have close date
-                if not open_date: open_date = close_date # Fallback
-                
-                symbol = row['Symbol']
-                
+                if not close_date:
+                    continue  # Must have close date
+                if not open_date:
+                    open_date = close_date  # Fallback
+
+                symbol = row["Symbol"]
+
                 try:
-                    qty = abs(int(float(row.get('Qty', 0))))
-                except:
+                    qty = abs(int(float(row.get("Qty", 0))))
+                except Exception:
                     qty = 0
-                    
+
                 try:
-                    entry = float(row.get('Entry', 0))
-                    exit_price = float(row.get('Exit', 0))
-                except:
+                    entry = float(row.get("Entry", 0))
+                    exit_price = float(row.get("Exit", 0))
+                except Exception:
                     entry = 0.0
                     exit_price = 0.0
-                
-                direction = row.get('Type', 'Long') # 'Long' or 'Short'
-                
+
+                direction = row.get("Type", "Long")  # 'Long' or 'Short'
+
                 # Fees Calculation
-                # Comm, Ecn Fee, SECTAF, NSCC, CL
-                def get_val(key):
-                    try: return float(row.get(key, 0))
-                    except: return 0.0
-                
+                def get_val(key: str, row: dict = row) -> float:
+                    try:
+                        return float(row.get(key, 0))
+                    except Exception:
+                        return 0.0
+
                 fees = 0.0
-                fee_cols = ['Comm', 'Ecn Fee', 'SECTAF', 'NSCC', 'CL']
-                for col in fee_cols:
-                    fees += abs(get_val(col)) # Fees are often negative in this CSV, we want the magnitude
-                
-                tag = row.get('TAG', '').strip()
+                for col in ALARIC_FEE_COLS:
+                    fees += abs(get_val(col))  # Fees are often negative in this CSV, we want the magnitude
+
+                tag = row.get("TAG", "").strip()
 
                 # Validate before creating
                 if not _validate_symbol(symbol):
@@ -411,122 +614,188 @@ def process_alaric_trades(filepath):
 
                 ct = ClosedTrade(symbol, open_date, close_date, qty, entry, exit_price, fees, 0.0, direction, tag)
                 trades.append(ct)
-                
+
     except Exception as e:
         print(f"Error reading Alaric CSV: {e}")
         return []
 
     return trades
 
+
 # --- CSV Validation ---
 
-def _validate_symbol(symbol):
-    """Reject empty, overly long, or suspicious symbols."""
+
+def _validate_symbol(symbol: str) -> bool:
+    """Valida que el simbolo no este vacio, no exceda el largo maximo y
+    solo contenga caracteres permitidos.
+
+    Args:
+        symbol: Simbolo ticker a validar.
+
+    Returns:
+        True si el simbolo es valido.
+    """
     if not symbol or not isinstance(symbol, str):
         return False
     symbol = symbol.strip()
-    if not symbol or len(symbol) > 40:  # 40 allows option keys
+    if not symbol or len(symbol) > SYMBOL_MAX_LEN:
         return False
     # Must be mostly alphanumeric (allow dots for forex/options, hyphens for futures)
-    return all(c.isalnum() or c in '.-_' for c in symbol)
+    return all(c.isalnum() or c in SYMBOL_ALLOWED_CHARS for c in symbol)
 
 
-def _validate_quantity(qty):
-    """Quantity must be positive integer within reasonable range."""
+def _validate_quantity(qty: int | float | str) -> bool:
+    """Valida que la cantidad sea un entero positivo dentro del rango permitido.
+
+    Args:
+        qty: Cantidad a validar.
+
+    Returns:
+        True si la cantidad es valida.
+    """
     try:
         q = int(float(qty))
     except (ValueError, TypeError):
         return False
-    return 1 <= q <= 10_000_000
+    return QTY_MIN <= q <= QTY_MAX
 
 
-def _validate_price(price):
-    """Price must be non-negative float within reasonable range."""
+def _validate_price(price: float | str) -> bool:
+    """Valida que el precio sea un float no negativo dentro del rango permitido.
+
+    Args:
+        price: Precio a validar.
+
+    Returns:
+        True si el precio es valido.
+    """
     try:
         p = float(price)
     except (ValueError, TypeError):
         return False
-    return 0.0 <= p <= 10_000_000.0
+    return PRICE_MIN <= p <= PRICE_MAX
 
 
-def _validate_date(dt):
-    """Date must be a valid datetime between 2000 and 2100."""
+def _validate_date(dt: datetime.datetime | None) -> bool:
+    """Valida que la fecha sea un datetime valido entre DATE_MIN y DATE_MAX.
+
+    Args:
+        dt: Datetime a validar.
+
+    Returns:
+        True si la fecha es valida.
+    """
     if dt is None:
         return False
     if not isinstance(dt, datetime.datetime):
         return False
-    return datetime.datetime(2000, 1, 1) <= dt <= datetime.datetime(2100, 1, 1)
+    return DATE_MIN <= dt <= DATE_MAX
+
 
 # --- End Validation ---
 
-def process_metatrader_trades(filepath):
-    """Parse MetaTrader 4/5 Account History CSV into ClosedTrade list."""
+
+def process_metatrader_trades(filepath: str) -> list[ClosedTrade]:
+    """Parsea MetaTrader 4/5 Account History CSV en lista de ClosedTrade.
+
+    Args:
+        filepath: Ruta al archivo CSV de MetaTrader.
+
+    Returns:
+        Lista de ClosedTrade. Vacia si hay error.
+    """
     trades = []
     try:
-        with open(filepath, 'r', encoding='utf-8-sig') as f:
+        with open(filepath, encoding="utf-8-sig") as f:
             reader = csv.DictReader(f)
             for row in reader:
-                if not row.get('Item'): continue
-                item = row['Item'].strip()
+                if not row.get("Item"):
+                    continue
+                item = row["Item"].strip()
                 # MT sometimes exports balance/credit rows — skip non-trading entries
-                if item.lower() in ('balance', 'credit', 'deposit', 'withdrawal', 'bonus', 'correction'):
+                if item.lower() in ("balance", "credit", "deposit", "withdrawal", "bonus", "correction"):
                     continue
 
                 # Parse dates: MT uses "YYYY.MM.DD HH:MM:SS" or "YYYY-MM-DD HH:MM:SS"
                 open_date = None
-                for fmt in ['%Y.%m.%d %H:%M:%S', '%Y-%m-%d %H:%M:%S',
-                            '%Y.%m.%d %H:%M', '%Y-%m-%d %H:%M',
-                            '%m/%d/%Y %H:%M:%S', '%m/%d/%Y %H:%M']:
+                for fmt in [
+                    "%Y.%m.%d %H:%M:%S",
+                    "%Y-%m-%d %H:%M:%S",
+                    "%Y.%m.%d %H:%M",
+                    "%Y-%m-%d %H:%M",
+                    "%m/%d/%Y %H:%M:%S",
+                    "%m/%d/%Y %H:%M",
+                ]:
                     try:
-                        open_date = datetime.datetime.strptime(row.get('Open Time', '').strip(), fmt)
+                        open_date = datetime.datetime.strptime(row.get("Open Time", "").strip(), fmt)
                         break
                     except ValueError:
                         continue
 
                 close_date = None
-                for fmt in ['%Y.%m.%d %H:%M:%S', '%Y-%m-%d %H:%M:%S',
-                            '%Y.%m.%d %H:%M', '%Y-%m-%d %H:%M',
-                            '%m/%d/%Y %H:%M:%S', '%m/%d/%Y %H:%M']:
+                for fmt in [
+                    "%Y.%m.%d %H:%M:%S",
+                    "%Y-%m-%d %H:%M:%S",
+                    "%Y.%m.%d %H:%M",
+                    "%Y-%m-%d %H:%M",
+                    "%m/%d/%Y %H:%M:%S",
+                    "%m/%d/%Y %H:%M",
+                ]:
                     try:
-                        close_date = datetime.datetime.strptime(row.get('Close Time', '').strip(), fmt)
+                        close_date = datetime.datetime.strptime(row.get("Close Time", "").strip(), fmt)
                         break
                     except ValueError:
                         continue
 
-                if not open_date or not close_date: continue
+                if not open_date or not close_date:
+                    continue
 
                 symbol = item
-                try: qty = abs(int(float(row.get('Size', '0'))))
-                except: qty = 0
-                if qty == 0: continue
+                try:
+                    qty = abs(int(float(row.get("Size", "0"))))
+                except Exception:
+                    qty = 0
+                if qty == 0:
+                    continue
 
-                try: entry = float(row.get('Price', '0'))
-                except: entry = 0.0
-                try: exit_price = float(row.get('Close Price', '0'))
-                except: exit_price = 0.0
+                try:
+                    entry = float(row.get("Price", "0"))
+                except Exception:
+                    entry = 0.0
+                try:
+                    exit_price = float(row.get("Close Price", "0"))
+                except Exception:
+                    exit_price = 0.0
 
                 # MT Type field: 'buy' = Long, 'sell' = Short
-                mt_type = row.get('Type', '').strip().lower()
-                direction = 'Long' if 'buy' in mt_type else 'Short'
+                mt_type = row.get("Type", "").strip().lower()
+                direction = "Long" if "buy" in mt_type else "Short"
 
                 # Fees: Commission + Swap + Taxes
-                try: commission = float(row.get('Commission', '0'))
-                except: commission = 0.0
-                try: swap = float(row.get('Swap', '0'))
-                except: swap = 0.0
-                try: taxes = float(row.get('Taxes', '0'))
-                except: taxes = 0.0
+                try:
+                    commission = float(row.get("Commission", "0"))
+                except Exception:
+                    commission = 0.0
+                try:
+                    swap = float(row.get("Swap", "0"))
+                except Exception:
+                    swap = 0.0
+                try:
+                    taxes = float(row.get("Taxes", "0"))
+                except Exception:
+                    taxes = 0.0
                 total_fees = abs(commission) + abs(swap) + abs(taxes)
                 # Entry and exit tag from MT Comment (optional)
-                mt_tag = row.get('Comment', '').strip()
+                mt_tag = row.get("Comment", "").strip()
                 if not _validate_symbol(symbol) or not _validate_quantity(qty):
                     continue
                 if not _validate_price(entry) or not _validate_price(exit_price):
                     continue
                 if not _validate_date(open_date) or not _validate_date(close_date):
                     continue
-                ct = ClosedTrade(symbol, open_date, close_date, qty, entry, exit_price,
-                                total_fees, 0.0, direction, tag=mt_tag)
+                ct = ClosedTrade(
+                    symbol, open_date, close_date, qty, entry, exit_price, total_fees, 0.0, direction, tag=mt_tag
+                )
                 trades.append(ct)
     except Exception as e:
         print(f"Error reading MetaTrader CSV {filepath}: {e}")
@@ -534,60 +803,75 @@ def process_metatrader_trades(filepath):
     return trades
 
 
-def process_das_trades(filepath):
-    """Parse DAS Trader execution CSV into Trade list (needs FIFO matching)."""
+def process_das_trades(filepath: str) -> list[Trade]:
+    """Parsea CSV de DAS Trader en lista de Trade para FIFO matching.
+
+    Args:
+        filepath: Ruta al archivo CSV de DAS Trader.
+
+    Returns:
+        Lista de Trade. Vacia si hay error.
+    """
     trades = []
     try:
-        with open(filepath, 'r', encoding='utf-8-sig') as f:
+        with open(filepath, encoding="utf-8-sig") as f:
             reader = csv.DictReader(f)
             reader.fieldnames = [name.strip() for name in reader.fieldnames]
             data_rows = list(reader)
             data_rows.reverse()  # DAS exports most recent first
 
             for row in data_rows:
-                side = row.get('Side', '').strip().upper()
-                if not side: continue
+                side = row.get("Side", "").strip().upper()
+                if not side:
+                    continue
 
                 # Parse date: "MM/DD/YYYY" or "YYYY-MM-DD"
-                date_str = row.get('Date', '').strip()
+                date_str = row.get("Date", "").strip()
                 date = None
-                for fmt in ['%m/%d/%Y', '%Y-%m-%d', '%m/%d/%y', '%d/%m/%Y']:
+                for fmt in ["%m/%d/%Y", "%Y-%m-%d", "%m/%d/%y", "%d/%m/%Y"]:
                     try:
                         date = datetime.datetime.strptime(date_str, fmt)
                         break
                     except ValueError:
                         continue
-                if not date: continue
+                if not date:
+                    continue
 
-                symbol = row.get('Symbol', '').strip()
-                try: qty = int(float(row.get('Quantity', '0')))
-                except: qty = 0
-                if qty == 0: continue
+                symbol = row.get("Symbol", "").strip()
+                try:
+                    qty = int(float(row.get("Quantity", "0")))
+                except Exception:
+                    qty = 0
+                if qty == 0:
+                    continue
 
-                try: price = float(row.get('Price', '0'))
-                except: price = 0.0
+                try:
+                    price = float(row.get("Price", "0"))
+                except Exception:
+                    price = 0.0
 
-                # DAS fees: check 'Executed' or 'Commission' columns
+                # DAS fees: iterate column list from constants
                 fees = 0.0
-                for fee_col in ['Commission', 'Executed', 'Fees', 'SEC', 'TAF']:
-                    try: fees += abs(float(row.get(fee_col, '0')))
-                    except: pass
+                for fee_col in DAS_FEE_COLS:
+                    with contextlib.suppress(Exception):
+                        fees += abs(float(row.get(fee_col, "0")))
 
                 # Normalize action
-                if 'SHORT' in side and 'SELL' in side:
-                    action = 'Sell'
-                elif 'SHORT' in side:
-                    action = 'Sell'
-                elif 'COVER' in side:
-                    action = 'Buy'
-                elif 'BUY' in side:
-                    action = 'Buy'
-                elif 'SELL' in side:
-                    action = 'Sell'
+                if "SHORT" in side and "SELL" in side or "SHORT" in side:
+                    action = "Sell"
+                elif "COVER" in side or "BUY" in side:
+                    action = "Buy"
+                elif "SELL" in side:
+                    action = "Sell"
                 else:
-                    action = 'Buy' if 'buy' in side.lower() else 'Sell'
+                    action = "Buy" if "buy" in side.lower() else "Sell"
 
-                if _validate_symbol(symbol) and _validate_quantity(qty) and _validate_price(price) and _validate_date(date):
+                if (
+                    _validate_symbol(symbol)
+                    and _validate_quantity(qty)
+                    and _validate_price(price)
+                    and _validate_date(date)
+                ):
                     trades.append(Trade(date, symbol, qty, price, action, fees))
     except Exception as e:
         print(f"Error reading DAS CSV {filepath}: {e}")
@@ -595,66 +879,88 @@ def process_das_trades(filepath):
     return trades
 
 
-def process_tos_trades(filepath):
-    """Parse ThinkOrSwim CSV into Trade list (needs FIFO matching)."""
+def process_tos_trades(filepath: str) -> list[Trade]:
+    """Parsea CSV de ThinkOrSwim en lista de Trade para FIFO matching.
+
+    Args:
+        filepath: Ruta al archivo CSV de ThinkOrSwim.
+
+    Returns:
+        Lista de Trade. Vacia si hay error.
+    """
     trades = []
     try:
-        with open(filepath, 'r', encoding='utf-8-sig') as f:
+        with open(filepath, encoding="utf-8-sig") as f:
             reader = csv.DictReader(f)
             reader.fieldnames = [name.strip() for name in reader.fieldnames]
             data_rows = list(reader)
             data_rows.reverse()
 
             for row in data_rows:
-                trans = row.get('TRANSACTION', row.get('Transaction', '')).strip()
-                if not trans: continue
+                trans = row.get("TRANSACTION", row.get("Transaction", "")).strip()
+                if not trans:
+                    continue
                 trans_upper = trans.upper()
 
                 # Filter: only equity trades
-                if any(kw in trans_upper for kw in ['INTEREST', 'DIVIDEND', 'ACH', 'TRANSFER',
-                                                      'BALANCE', 'JOURNAL', 'ADJUSTMENT']):
+                if any(
+                    kw in trans_upper
+                    for kw in ["INTEREST", "DIVIDEND", "ACH", "TRANSFER", "BALANCE", "JOURNAL", "ADJUSTMENT"]
+                ):
                     continue
 
                 # Parse date: "MM/DD/YYYY"
                 date = None
-                date_str = row.get('DATE', row.get('Date', '')).strip()
-                for fmt in ['%m/%d/%Y', '%m/%d/%y', '%Y-%m-%d']:
+                date_str = row.get("DATE", row.get("Date", "")).strip()
+                for fmt in ["%m/%d/%Y", "%m/%d/%y", "%Y-%m-%d"]:
                     try:
                         date = datetime.datetime.strptime(date_str, fmt)
                         break
                     except ValueError:
                         continue
-                if not date: continue
+                if not date:
+                    continue
 
-                symbol = row.get('SYMBOL', row.get('Symbol', '')).strip()
-                if not symbol: continue
+                symbol = row.get("SYMBOL", row.get("Symbol", "")).strip()
+                if not symbol:
+                    continue
 
-                try: qty = int(float(row.get('QTY', row.get('Quantity', '0')).replace(',', '')))
-                except: qty = 0
-                if qty == 0: continue
+                try:
+                    qty = int(float(row.get("QTY", row.get("Quantity", "0")).replace(",", "")))
+                except Exception:
+                    qty = 0
+                if qty == 0:
+                    continue
 
-                try: price = float(row.get('PRICE', row.get('Price', '0')).replace('$', ''))
-                except: price = 0.0
+                try:
+                    price = float(row.get("PRICE", row.get("Price", "0")).replace("$", ""))
+                except Exception:
+                    price = 0.0
 
-                # Fees
+                # Fees: iterate column list from constants
                 fees = 0.0
-                for fee_col in ['COMMISSION/FEE', 'COMMISSION', 'FEES', 'Commission/Fee', 'Comm']:
-                    try: fees += abs(float(row.get(fee_col, '0').replace('$', '')))
-                    except: pass
+                for fee_col in TOS_FEE_COLS:
+                    with contextlib.suppress(Exception):
+                        fees += abs(float(row.get(fee_col, "0").replace("$", "")))
 
                 # Normalize action
-                if any(kw in trans_upper for kw in ['SELL SHORT', 'SHORT SELL', 'SOLD SHORT']):
-                    action = 'Sell'
-                elif any(kw in trans_upper for kw in ['BUY TO COVER', 'BOUGHT TO COVER', 'COVER']):
-                    action = 'Buy'
-                elif 'SELL' in trans_upper:
-                    action = 'Sell'
-                elif 'BUY' in trans_upper:
-                    action = 'Buy'
+                if any(kw in trans_upper for kw in ["SELL SHORT", "SHORT SELL", "SOLD SHORT"]):
+                    action = "Sell"
+                elif any(kw in trans_upper for kw in ["BUY TO COVER", "BOUGHT TO COVER", "COVER"]):
+                    action = "Buy"
+                elif "SELL" in trans_upper:
+                    action = "Sell"
+                elif "BUY" in trans_upper:
+                    action = "Buy"
                 else:
                     continue  # Skip unrecognized
 
-                if _validate_symbol(symbol) and _validate_quantity(qty) and _validate_price(price) and _validate_date(date):
+                if (
+                    _validate_symbol(symbol)
+                    and _validate_quantity(qty)
+                    and _validate_price(price)
+                    and _validate_date(date)
+                ):
                     trades.append(Trade(date, symbol, qty, price, action, fees))
     except Exception as e:
         print(f"Error reading ThinkOrSwim CSV {filepath}: {e}")
@@ -662,118 +968,113 @@ def process_tos_trades(filepath):
     return trades
 
 
-def process_generic_trades(filepath):
-    """Parse a generic CSV using a mapping.json in the same directory.
+def process_generic_trades(filepath: str) -> list[Trade] | list[ClosedTrade]:
+    """Parsea un CSV generico usando un mapping.json en el mismo directorio.
 
-    Returns list[Trade] for execution CSVs, list[ClosedTrade] for pre-matched CSVs.
-    The mapping.json should look like:
-    {
-        "type": "executions",
-        "date_col": "Date",
-        "date_format": "%m/%d/%Y",
-        "symbol_col": "Symbol",
-        "action_col": "Side",
-        "quantity_col": "Qty",
-        "price_col": "Price",
-        "fees_col": "Commission",
-        "net_pl_col": "P&L",
-        "buy_values": ["BUY"],
-        "sell_values": ["SELL"],
-        "direction_col": "Direction",
-        "long_values": ["Long", "LONG"],
-        "short_values": ["Short", "SHORT"]
-    }
-    or for matched trades directly:
-    {
-        "type": "matched",
-        "symbol_col": "Symbol",
-        "date_format": "%m/%d/%Y",
-        ...
-    }
-    If mapping.json is missing, raises an error suggesting the user create one.
+    Retorna list[Trade] para CSVs de ejecuciones, list[ClosedTrade] para CSVs pre-matched.
+    Si mapping.json no existe, lanza FileNotFoundError.
+
+    Args:
+        filepath: Ruta al archivo CSV.
+
+    Returns:
+        Lista de Trade o ClosedTrade. Vacia si hay error.
+
+    Raises:
+        FileNotFoundError: Si no hay mapping.json en el directorio.
     """
     import json as _json
 
     dir_path = os.path.dirname(filepath)
-    mapping_path = os.path.join(dir_path, 'mapping.json')
+    mapping_path = os.path.join(dir_path, "mapping.json")
     if not os.path.exists(mapping_path):
         raise FileNotFoundError(
             f"No mapping.json found in {dir_path}. Create one to describe your CSV columns. "
             f"See documentation for the format."
         )
 
-    with open(mapping_path, 'r', encoding='utf-8') as mf:
+    with open(mapping_path, encoding="utf-8") as mf:
         mapping = _json.load(mf)
 
-    trade_type = mapping.get('type', 'executions')
-    date_col = mapping.get('date_col', 'Date')
-    date_fmt = mapping.get('date_format', '%m/%d/%Y')
-    symbol_col = mapping.get('symbol_col', 'Symbol')
-    qty_col = mapping.get('quantity_col', 'Qty')
-    price_col = mapping.get('price_col', 'Price')
-    fees_col = mapping.get('fees_col', '')
+    trade_type = mapping.get("type", "executions")
+    date_col = mapping.get("date_col", "Date")
+    date_fmt = mapping.get("date_format", "%m/%d/%Y")
+    symbol_col = mapping.get("symbol_col", "Symbol")
+    qty_col = mapping.get("quantity_col", "Qty")
+    price_col = mapping.get("price_col", "Price")
+    fees_col = mapping.get("fees_col", "")
 
     items = []
     try:
-        with open(filepath, 'r', encoding='utf-8-sig') as f:
+        with open(filepath, encoding="utf-8-sig") as f:
             reader = csv.DictReader(f)
             reader.fieldnames = [name.strip() for name in reader.fieldnames]
 
             for row in reader:
                 # Parse date
-                date_str = row.get(date_col, '').strip()
+                date_str = row.get(date_col, "").strip()
                 date = None
-                for fmt in [date_fmt, '%m/%d/%Y', '%Y-%m-%d', '%m/%d/%y', '%d/%m/%Y']:
+                for fmt in [date_fmt, "%m/%d/%Y", "%Y-%m-%d", "%m/%d/%y", "%d/%m/%Y"]:
                     try:
                         date = datetime.datetime.strptime(date_str, fmt)
                         break
                     except ValueError:
                         continue
-                if not date: continue
+                if not date:
+                    continue
 
-                symbol = row.get(symbol_col, '').strip()
-                if not symbol: continue
+                symbol = row.get(symbol_col, "").strip()
+                if not symbol:
+                    continue
 
-                try: qty = abs(int(float(row.get(qty_col, '0').replace(',', ''))))
-                except: qty = 0
-                if qty == 0: continue
+                try:
+                    qty = abs(int(float(row.get(qty_col, "0").replace(",", ""))))
+                except Exception:
+                    qty = 0
+                if qty == 0:
+                    continue
 
-                try: price = float(row.get(price_col, '0').replace('$', '').replace(',', ''))
-                except: price = 0.0
+                try:
+                    price = float(row.get(price_col, "0").replace("$", "").replace(",", ""))
+                except Exception:
+                    price = 0.0
 
                 # Fees
                 fees = 0.0
                 if fees_col:
-                    try: fees = abs(float(row.get(fees_col, '0').replace('$', '').replace(',', '')))
-                    except: pass
+                    with contextlib.suppress(Exception):
+                        fees = abs(float(row.get(fees_col, "0").replace("$", "").replace(",", "")))
 
-                if trade_type == 'executions':
-                    action_col = mapping.get('action_col', 'Side')
-                    raw_action = row.get(action_col, '').strip()
-                    buy_vals = mapping.get('buy_values', ['BUY', 'Buy', 'buy'])
-                    sell_vals = mapping.get('sell_values', ['SELL', 'Sell', 'sell'])
-                    if raw_action in sell_vals:
-                        action = 'Sell'
-                    else:
-                        action = 'Buy'  # default
-                    if _validate_symbol(symbol) and _validate_quantity(qty) and _validate_price(price) and _validate_date(date):
+                if trade_type == "executions":
+                    action_col = mapping.get("action_col", "Side")
+                    raw_action = row.get(action_col, "").strip()
+                    sell_vals = mapping.get("sell_values", ["SELL", "Sell", "sell"])
+                    action = "Sell" if raw_action in sell_vals else "Buy"
+                    if (
+                        _validate_symbol(symbol)
+                        and _validate_quantity(qty)
+                        and _validate_price(price)
+                        and _validate_date(date)
+                    ):
                         items.append(Trade(date, symbol, qty, price, action, fees))
 
-                elif trade_type == 'matched':
+                elif trade_type == "matched":
                     # For pre-matched trades
-                    dir_col = mapping.get('direction_col', 'Direction')
-                    long_vals = mapping.get('long_values', ['Long', 'LONG'])
-                    raw_dir = row.get(dir_col, 'Long').strip()
-                    direction = 'Long' if raw_dir in long_vals else 'Short'
+                    dir_col = mapping.get("direction_col", "Direction")
+                    long_vals = mapping.get("long_values", ["Long", "LONG"])
+                    raw_dir = row.get(dir_col, "Long").strip()
+                    direction = "Long" if raw_dir in long_vals else "Short"
 
                     # Get entry/exit info
                     # Option A: entry=price, exit from net_pl
-                    net_pl_col = mapping.get('net_pl_col', '')
+                    net_pl_col = mapping.get("net_pl_col", "")
                     entry_price = price
                     if net_pl_col:
-                        try: net_pl = float(row.get(net_pl_col, '0').replace('$', '').replace(',', ''))
-                        except: net_pl = 0.0
-                        if direction == 'Long' and qty > 0:
+                        try:
+                            net_pl = float(row.get(net_pl_col, "0").replace("$", "").replace(",", ""))
+                        except Exception:
+                            net_pl = 0.0
+                        if direction == "Long" and qty > 0:
                             exit_price = entry_price + (net_pl / qty)
                         elif qty > 0:
                             exit_price = entry_price - (net_pl / qty)
@@ -781,14 +1082,22 @@ def process_generic_trades(filepath):
                             exit_price = entry_price
                     else:
                         # Option B: explicit exit_price column
-                        exit_col = mapping.get('exit_price_col', '')
-                        try: exit_price = float(row.get(exit_col, '0').replace('$', '').replace(',', ''))
-                        except: exit_price = entry_price
+                        exit_col = mapping.get("exit_price_col", "")
+                        try:
+                            exit_price = float(row.get(exit_col, "0").replace("$", "").replace(",", ""))
+                        except Exception:
+                            exit_price = entry_price
 
-                    tag = row.get(mapping.get('tag_col', ''), '').strip()
-                    if _validate_symbol(symbol) and _validate_quantity(qty) and _validate_price(entry_price) and _validate_date(date):
-                        ct = ClosedTrade(symbol, date, date, qty, entry_price, exit_price,
-                                        fees, 0.0, direction, tag=tag)
+                    tag = row.get(mapping.get("tag_col", ""), "").strip()
+                    if (
+                        _validate_symbol(symbol)
+                        and _validate_quantity(qty)
+                        and _validate_price(entry_price)
+                        and _validate_date(date)
+                    ):
+                        ct = ClosedTrade(
+                            symbol, date, date, qty, entry_price, exit_price, fees, 0.0, direction, tag=tag
+                        )
                         items.append(ct)
     except Exception as e:
         print(f"Error reading Generic CSV {filepath}: {e}")
@@ -796,48 +1105,58 @@ def process_generic_trades(filepath):
     return items
 
 
-def match_trades(trades):
+def match_trades(trades: list[Trade]) -> list[ClosedTrade]:
+    """Empareja ejecuciones Buy/Sell usando FIFO para generar ClosedTrade.
+
+    Args:
+        trades: Lista desordenada de ejecuciones Trade.
+
+    Returns:
+        Lista de ClosedTrade resultantes del matching FIFO.
+    """
     trades = sorted(trades, key=lambda t: (t.date, t.symbol))
     position_queues = collections.defaultdict(collections.deque)
     closed_trades = []
-    
+
     for t in trades:
         if not position_queues[t.symbol]:
             position_queues[t.symbol].append(t)
             continue
-            
+
         open_lot = position_queues[t.symbol][0]
-        is_closing = (open_lot.action != t.action)
-        
+        is_closing = open_lot.action != t.action
+
         if not is_closing:
             position_queues[t.symbol].append(t)
         else:
             qty_remaining_to_close = t.quantity
             current_fees_per_share = t.fees / t.quantity if t.quantity > 0 else 0
-            
+
             while qty_remaining_to_close > 0 and position_queues[t.symbol]:
                 lot = position_queues[t.symbol][0]
                 qty_matched = min(qty_remaining_to_close, lot.quantity)
-                
-                if not hasattr(lot, 'unit_fee'):
+
+                if not hasattr(lot, "unit_fee"):
                     lot.unit_fee = lot.fees / lot.quantity if lot.quantity > 0 else 0
-                
+
                 entry_fees = lot.unit_fee * qty_matched
                 exit_fees = current_fees_per_share * qty_matched
-                
-                direction = 'Long' if lot.action == 'Buy' else 'Short'
+
+                direction = "Long" if lot.action == "Buy" else "Short"
                 entry_price = lot.price
                 exit_price = t.price
-                
-                closed = ClosedTrade(t.symbol, lot.date, t.date, qty_matched, entry_price, exit_price, entry_fees, exit_fees, direction) # No tag for matched trades currently
+
+                closed = ClosedTrade(
+                    t.symbol, lot.date, t.date, qty_matched, entry_price, exit_price, entry_fees, exit_fees, direction
+                )  # No tag for matched trades currently
                 closed_trades.append(closed)
-                
+
                 qty_remaining_to_close -= qty_matched
                 lot.quantity -= qty_matched
-                
+
                 if lot.quantity == 0:
                     position_queues[t.symbol].popleft()
-            
+
             if qty_remaining_to_close > 0:
                 remainder_fees = current_fees_per_share * qty_remaining_to_close
                 remainder_trade = Trade(t.date, t.symbol, qty_remaining_to_close, t.price, t.action, remainder_fees)
@@ -846,8 +1165,17 @@ def match_trades(trades):
 
     return closed_trades
 
-def _is_date(value, fmt):
-    """Return True if value can be parsed with the given strptime format."""
+
+def _is_date(value: str, fmt: str) -> bool:
+    """Verifica si un string puede parsearse con el formato strptime dado.
+
+    Args:
+        value: String fecha a verificar.
+        fmt: Formato strptime esperado.
+
+    Returns:
+        True si el string se puede parsear exitosamente.
+    """
     try:
         datetime.datetime.strptime(value, fmt)
         return True
@@ -855,21 +1183,26 @@ def _is_date(value, fmt):
         return False
 
 
+def process_gastos(filepath: str) -> list[tuple[str, str, str, float]]:
+    """Parsea CSV de gastos y devuelve tuplas (date_str, category, comment, amount).
 
-def process_gastos(filepath):
-    # Returns a list of (date_str, category, comment, amount) tuples for detailed deduplication
+    Args:
+        filepath: Ruta al archivo CSV de gastos.
+
+    Returns:
+        Lista de tuplas (date_str, category, comment, amount). Vacia si no se encuentra el archivo.
+    """
     expense_items = []
     try:
-        with open(filepath, mode='r', encoding='utf-8-sig') as f:
+        with open(filepath, encoding="utf-8-sig") as f:
             # Detect if the file has a header row.
             # Header rows start with a non-date string like "Date"; data rows start with a date like "04/01/2026".
             first_line = f.readline().strip()
             f.seek(0)
 
-            first_cell = first_line.split(',')[0].strip()
+            first_cell = first_line.split(",")[0].strip()
             first_cell_is_date = any(
-                _is_date(first_cell, fmt)
-                for fmt in ('%m/%d/%Y', '%m/%d/%y', '%d/%m/%Y', '%d/%m/%y', '%Y-%m-%d')
+                _is_date(first_cell, fmt) for fmt in ("%m/%d/%Y", "%m/%d/%y", "%d/%m/%Y", "%d/%m/%y", "%Y-%m-%d")
             )
             has_header = not first_cell_is_date
 
@@ -877,21 +1210,22 @@ def process_gastos(filepath):
                 reader = csv.DictReader(f)
             else:
                 # No header: columns are Date, Category, Comment, Debit (4 columns)
-                reader = csv.DictReader(f, fieldnames=['Date', 'Category', 'Comment', 'Debit'])
+                reader = csv.DictReader(f, fieldnames=["Date", "Category", "Comment", "Debit"])
 
             for row in reader:
                 try:
-                    date_str = row['Date'].strip()
-                    if not date_str: continue
-                    
+                    date_str = row["Date"].strip()
+                    if not date_str:
+                        continue
+
                     dt = None
-                    for fmt in ('%m/%d/%Y', '%m/%d/%y', '%d/%m/%Y', '%d/%m/%y'):
+                    for fmt in ("%m/%d/%Y", "%m/%d/%y", "%d/%m/%Y", "%d/%m/%y"):
                         try:
                             dt = datetime.datetime.strptime(date_str, fmt)
                             break
                         except ValueError:
                             continue
-                    
+
                     if not dt:
                         print(f"  Warning: Could not parse date '{date_str}' in {filepath}")
                         continue
@@ -899,23 +1233,23 @@ def process_gastos(filepath):
                     # Ensure we have a reasonable year (if 26 -> 2026)
                     if dt.year < 100:
                         dt = dt.replace(year=dt.year + 2000)
-                    elif dt.year < 1900: # Handle cases where %y might be parsed weirdly depending on system
-                        if dt.year < 70: dt = dt.replace(year=dt.year + 2000)
-                        else: dt = dt.replace(year=dt.year + 1900)
+                    elif dt.year < 1900:  # Handle cases where %y might be parsed weirdly depending on system
+                        dt = dt.replace(year=dt.year + 2000) if dt.year < 70 else dt.replace(year=dt.year + 1900)
                     # Safety clamp: skip unreasonable years (e.g. 2106 from year 206)
                     if dt.year < 2000 or dt.year > 2100:
                         print(f"  Warning: Unreasonable year {dt.year} for '{date_str}' in {filepath}, skipping")
                         continue
 
-                    key = dt.strftime('%Y-%m-%d')
-                    
-                    debit_str = row['Debit'].replace(',', '').strip()
-                    if not debit_str or float(debit_str) == 0: continue
-                    
-                    category = row.get('Category', '').strip()
-                    comment = row.get('Comment', '').strip()
+                    key = dt.strftime("%Y-%m-%d")
+
+                    debit_str = row["Debit"].replace(",", "").strip()
+                    if not debit_str or float(debit_str) == 0:
+                        continue
+
+                    category = row.get("Category", "").strip()
+                    comment = row.get("Comment", "").strip()
                     amount = float(debit_str)
-                    
+
                     expense_items.append((key, category, comment, amount))
                 except (ValueError, KeyError):
                     continue
@@ -923,104 +1257,123 @@ def process_gastos(filepath):
         print(f"Warning: Expenses file {filepath} not found.")
     return expense_items
 
-def generate_html_report(closed_trades, expenses_by_day, floating_positions=None):
+
+def generate_html_report(
+    closed_trades: list[ClosedTrade],
+    expenses_by_day: dict[str, float],
+    floating_positions: list | None = None,
+) -> str:
     # --- Aggregation Helper ---
     def calculate_kpis(trade_list):
         if not trade_list:
-            default_month = {'net_pl': 0.0, 'fees': 0.0, 'count': 0}
+            default_month = {"net_pl": 0.0, "fees": 0.0, "count": 0}
             return {
-                'gross_pl': 0.0, 'net_pl': 0.0, 'fees': 0.0, 'expenses': 0.0,
-                'profit_factor': 0.0, 'win_rate': 0.0, 'total_trades': 0, 'long_count': 0, 'short_count': 0,
-                'monthly_breakdown': {i: default_month.copy() for i in range(1, 13)}
+                "gross_pl": 0.0,
+                "net_pl": 0.0,
+                "fees": 0.0,
+                "expenses": 0.0,
+                "profit_factor": 0.0,
+                "win_rate": 0.0,
+                "total_trades": 0,
+                "long_count": 0,
+                "short_count": 0,
+                "monthly_breakdown": {i: default_month.copy() for i in range(1, 13)},
             }
-        
+
         net_pl_val = 0.0
         total_fees = 0.0
         wins = []
         losses = []
 
         # Monthly Accumulators
-        monthly_stats = {i: {'net_pl': 0.0, 'fees': 0.0, 'count': 0} for i in range(1, 13)}
+        monthly_stats = {i: {"net_pl": 0.0, "fees": 0.0, "count": 0} for i in range(1, 13)}
 
         for t in trade_list:
             net_pl_val += t.net_pl
             fees = t.entry_fees + t.exit_fees
             total_fees += fees
 
-            if t.gross_pl > 0: wins.append(t)
-            else: losses.append(t)
+            if t.gross_pl > 0:
+                wins.append(t)
+            else:
+                losses.append(t)
 
-            
             # Monthly Breakdown
             m_idx = int(t.close_date.month)
-            monthly_stats[m_idx]['net_pl'] += t.net_pl
-            monthly_stats[m_idx]['fees'] += fees
-            monthly_stats[m_idx]['count'] += 1
-            
+            monthly_stats[m_idx]["net_pl"] += t.net_pl
+            monthly_stats[m_idx]["fees"] += fees
+            monthly_stats[m_idx]["count"] += 1
+
         num_wins = len(wins)
         total_t = len(trade_list)
-        
+
         win_rate_val = (num_wins / total_t) * 100 if total_t > 0 else 0
         gross_wins = sum(t.gross_pl for t in wins)
         gross_losses = sum(t.gross_pl for t in losses)
-        profit_factor_val = abs(gross_wins / gross_losses) if losses and gross_losses != 0 else float('inf')
-        
+        profit_factor_val = abs(gross_wins / gross_losses) if losses and gross_losses != 0 else float("inf")
+
         gross_pl_val = net_pl_val + total_fees  # net = gross - fees
         return {
-            'gross_pl': gross_pl_val,
-            'net_pl': net_pl_val,
-            'fees': total_fees,
-            'profit_factor': profit_factor_val,
-            'win_rate': win_rate_val,
-            'total_trades': total_t,
-            'long_count': sum(1 for t in trade_list if t.direction == 'Long'),
-            'short_count': sum(1 for t in trade_list if t.direction == 'Short'),
-            'monthly_breakdown': monthly_stats
+            "gross_pl": gross_pl_val,
+            "net_pl": net_pl_val,
+            "fees": total_fees,
+            "profit_factor": profit_factor_val,
+            "win_rate": win_rate_val,
+            "total_trades": total_t,
+            "long_count": sum(1 for t in trade_list if t.direction == "Long"),
+            "short_count": sum(1 for t in trade_list if t.direction == "Short"),
+            "monthly_breakdown": monthly_stats,
         }
 
     def get_chart_data(trade_list):
         sorted_trades = sorted(trade_list, key=lambda x: x.close_date)
         cum_pl = 0
-        peak = -float('inf')
+        peak = -float("inf")
         eq_dates, eq_vals, dd_vals = [], [], []
         m_pl = collections.defaultdict(float)
-        
+
         for t in sorted_trades:
             cum_pl += t.net_pl
             if cum_pl > peak:
                 peak = cum_pl
             dd = cum_pl - peak
-            
-            eq_dates.append(t.close_date.strftime('%m/%y'))
+
+            eq_dates.append(t.close_date.strftime("%m/%y"))
             eq_vals.append(round(cum_pl, 2))
             dd_vals.append(round(dd, 2))
-            m_pl[t.close_date.strftime('%Y-%m')] += t.net_pl
-            
+            m_pl[t.close_date.strftime("%Y-%m")] += t.net_pl
+
         sorted_m = sorted(m_pl.keys())
         return {
-            'equity': {'labels': eq_dates, 'data': eq_vals},
-            'drawdown': {'labels': eq_dates, 'data': dd_vals},
-            'monthly': {'labels': sorted_m, 'data': [round(m_pl[m], 2) for m in sorted_m]}
+            "equity": {"labels": eq_dates, "data": eq_vals},
+            "drawdown": {"labels": eq_dates, "data": dd_vals},
+            "monthly": {"labels": sorted_m, "data": [round(m_pl[m], 2) for m in sorted_m]},
         }
 
     # Aggregation Helpers (Moved)
     def calculate_gl_stats(trade_list):
-        if not trade_list: return {'total_pl': 0.0, 'avg_pl': 0.0, 'avg_pct': 0.0, 'count': 0}
+        if not trade_list:
+            return {"total_pl": 0.0, "avg_pl": 0.0, "avg_pct": 0.0, "count": 0}
         total_pl = sum(t.gross_pl for t in trade_list)
         count = len(trade_list)
         avg_pl = total_pl / count
         avg_pct = sum(t.roi_pct for t in trade_list) / count
-        return {'total_pl': total_pl, 'avg_pl': avg_pl, 'avg_pct': avg_pct, 'count': count}
+        return {"total_pl": total_pl, "avg_pl": avg_pl, "avg_pct": avg_pct, "count": count}
 
     def calculate_advanced_stats(trade_list):
         if not trade_list:
             return {
-                'expectancy': 0.0, 'max_dd': 0.0, 'max_dd_date': '-',
-                'max_consec_wins': 0, 'max_consec_wins_dates': '-',
-                'max_consec_losses': 0, 'max_consec_losses_dates': '-',
-                'win_loss_ratio': 0.0, 'gain_to_pain': 0.0
+                "expectancy": 0.0,
+                "max_dd": 0.0,
+                "max_dd_date": "-",
+                "max_consec_wins": 0,
+                "max_consec_wins_dates": "-",
+                "max_consec_losses": 0,
+                "max_consec_losses_dates": "-",
+                "win_loss_ratio": 0.0,
+                "gain_to_pain": 0.0,
             }
-        
+
         # Expectancy
         total_pl = sum(t.gross_pl for t in trade_list)
         count = len(trade_list)
@@ -1029,25 +1382,25 @@ def generate_html_report(closed_trades, expenses_by_day, floating_positions=None
         # Win/Loss & Gain/Pain
         wins = [t.gross_pl for t in trade_list if t.gross_pl > 0]
         losses = [t.gross_pl for t in trade_list if t.gross_pl <= 0]
-        
+
         avg_win = sum(wins) / len(wins) if wins else 0
         avg_loss = sum(losses) / len(losses) if losses else 0
-        
+
         sum_wins = sum(wins)
         sum_losses = abs(sum(losses))
-        
-        win_loss_ratio = (avg_win / abs(avg_loss)) if avg_loss != 0 else float('inf')
-        gain_to_pain = sum_wins / sum_losses if sum_losses != 0 else float('inf')
+
+        win_loss_ratio = (avg_win / abs(avg_loss)) if avg_loss != 0 else float("inf")
+        gain_to_pain = sum_wins / sum_losses if sum_losses != 0 else float("inf")
 
         # Advanced Performance Metrics
         win_rate = len(wins) / count if count > 0 else 0
         loss_rate = 1 - win_rate
         edge_score = (win_rate * avg_win) + (loss_rate * avg_loss)
-        
+
         # Kelly Criterion
         payoff_ratio = (avg_win / abs(avg_loss)) if avg_loss != 0 else 0
         kelly = (win_rate - (1 - win_rate) / payoff_ratio) if payoff_ratio > 0 else 0
-        
+
         # Std Dev and SQN (based on gross P&L)
         pl_values = [t.gross_pl for t in trade_list]
         mean_pl = sum(pl_values) / count if count > 0 else 0
@@ -1058,7 +1411,7 @@ def generate_html_report(closed_trades, expenses_by_day, floating_positions=None
             std_dev = 0
 
         sqn = (mean_pl / std_dev) * math.sqrt(count) if std_dev > 0 else 0
-        sharpe = (mean_pl / std_dev) if std_dev > 0 else 0 # Simplified Sharpe
+        sharpe = (mean_pl / std_dev) if std_dev > 0 else 0  # Simplified Sharpe
 
         # Sortino Ratio (Downside Deviation)
         downside_returns = [min(0, t.gross_pl) for t in trade_list]
@@ -1071,40 +1424,40 @@ def generate_html_report(closed_trades, expenses_by_day, floating_positions=None
 
         # Drawdown & Streaks
         sorted_trades = sorted(trade_list, key=lambda x: x.close_date)
-        
+
         # Max Drawdown
-        peak = -float('inf')
+        peak = -float("inf")
         current_cum = 0
         max_dd = 0
-        max_dd_date = '-'
+        max_dd_date = "-"
         peak_date = None
-        max_dd_duration = 0 # Days
-        
+        max_dd_duration = 0  # Days
+
         # Streaks
-        current_streak_type = 0 # 1 win, -1 loss
+        current_streak_type = 0  # 1 win, -1 loss
         current_streak_count = 0
         current_streak_start = None
-        
+
         max_mod_wins = 0
-        max_wins_date = '-'
-        
+        max_wins_date = "-"
+
         max_mod_losses = 0
-        max_losses_date = '-'
-        
+        max_losses_date = "-"
+
         # Time Analysis
         win_durations = [t.duration for t in trade_list if t.gross_pl > 0]
         loss_durations = [t.duration for t in trade_list if t.gross_pl <= 0]
         avg_time_win = sum(win_durations) / len(win_durations) if win_durations else 0
-        avg_time_loss = sum(loss_durations) / len(loss_durations) if loss_durations else 0
-        
+        sum(loss_durations) / len(loss_durations) if loss_durations else 0
+
         # Long vs Short
-        longs = [t for t in trade_list if t.direction == 'Long']
-        shorts = [t for t in trade_list if t.direction == 'Short']
-        
+        longs = [t for t in trade_list if t.direction == "Long"]
+        shorts = [t for t in trade_list if t.direction == "Short"]
+
         def get_pf(trades):
             w = sum(t.gross_pl for t in trades if t.gross_pl > 0)
-            l = abs(sum(t.gross_pl for t in trades if t.gross_pl <= 0))
-            return w / l if l > 0 else (float('inf') if w > 0 else 0)
+            loss = abs(sum(t.gross_pl for t in trades if t.gross_pl <= 0))
+            return w / loss if loss > 0 else (float("inf") if w > 0 else 0)
 
         pf_long = get_pf(longs)
         pf_short = get_pf(shorts)
@@ -1121,7 +1474,7 @@ def generate_html_report(closed_trades, expenses_by_day, floating_positions=None
             dd = current_cum - peak
             if dd < max_dd:
                 max_dd = dd
-                max_dd_date = t.close_date.strftime('%Y-%m-%d')
+                max_dd_date = t.close_date.strftime("%Y-%m-%d")
                 if peak_date:
                     duration = (t.close_date - peak_date).days
                     if duration > max_dd_duration:
@@ -1130,115 +1483,116 @@ def generate_html_report(closed_trades, expenses_by_day, floating_positions=None
             # Streaks
             is_win = t.gross_pl > 0
             type_val = 1 if is_win else -1
-            
+
             if type_val == current_streak_type:
                 current_streak_count += 1
             else:
                 # End of streak, check max
                 if current_streak_type != 0:
-                    end_str = sorted_trades[i-1].close_date.strftime('%m/%d')
-                    start_str = current_streak_start.strftime('%m/%d')
+                    end_str = sorted_trades[i - 1].close_date.strftime("%m/%d")
+                    start_str = current_streak_start.strftime("%m/%d")
                     date_range = f"{start_str}-{end_str}"
-                    
+
                     if current_streak_type == 1:
                         if current_streak_count > max_mod_wins:
                             max_mod_wins = current_streak_count
                             max_wins_date = date_range
-                    elif current_streak_type == -1:
-                        if current_streak_count > max_mod_losses:
-                            max_mod_losses = current_streak_count
-                            max_losses_date = date_range
-                
+                    elif current_streak_type == -1 and current_streak_count > max_mod_losses:
+                        max_mod_losses = current_streak_count
+                        max_losses_date = date_range
+
                 current_streak_type = type_val
                 current_streak_count = 1
                 current_streak_start = t.close_date
-        
+
         # Final streak check
         if current_streak_count > 0:
-            end_str = sorted_trades[-1].close_date.strftime('%m/%d')
-            start_str = current_streak_start.strftime('%m/%d')
+            end_str = sorted_trades[-1].close_date.strftime("%m/%d")
+            start_str = current_streak_start.strftime("%m/%d")
             date_range = f"{start_str}-{end_str}"
             if current_streak_type == 1:
                 if current_streak_count > max_mod_wins:
                     max_mod_wins = current_streak_count
                     max_wins_date = date_range
-            elif current_streak_type == -1:
-                if current_streak_count > max_mod_losses:
-                    max_mod_losses = current_streak_count
-                    max_losses_date = date_range
+            elif current_streak_type == -1 and current_streak_count > max_mod_losses:
+                max_mod_losses = current_streak_count
+                max_losses_date = date_range
 
-        recovery_factor = total_pl / abs(max_dd) if max_dd != 0 else (float('inf') if total_pl > 0 else 0)
-        
+        recovery_factor = total_pl / abs(max_dd) if max_dd != 0 else (float("inf") if total_pl > 0 else 0)
+
         # Calmar Ratio (Simplified: NetPL / MaxDD)
-        calmar = recovery_factor # Usually annualized, but here we use total period
-        
+        calmar = recovery_factor  # Usually annualized, but here we use total period
+
         # Z-Score (Streaks)
         # WWLLW -> streaks: WW, LL, W -> 3 streaks
         streaks_count = 0
         if sorted_trades:
             streaks_count = 1
             for i in range(1, len(sorted_trades)):
-                if (sorted_trades[i].net_pl > 0) != (sorted_trades[i-1].net_pl > 0):
+                if (sorted_trades[i].net_pl > 0) != (sorted_trades[i - 1].net_pl > 0):
                     streaks_count += 1
-        
+
         n_wins = len(wins)
         if count > 1:
-            z_score = (count * (streaks_count - 0.5) - 2 * n_wins * (count - n_wins)) / \
-                      ( (2 * n_wins * (count - n_wins) * (2 * n_wins * (count - n_wins) - count)) / (count - 1) )**0.5 \
-                      if (2 * n_wins * (count - n_wins) * (2 * n_wins * (count - n_wins) - count)) > 0 else 0
+            z_score = (
+                (count * (streaks_count - 0.5) - 2 * n_wins * (count - n_wins))
+                / ((2 * n_wins * (count - n_wins) * (2 * n_wins * (count - n_wins) - count)) / (count - 1)) ** 0.5
+                if (2 * n_wins * (count - n_wins) * (2 * n_wins * (count - n_wins) - count)) > 0
+                else 0
+            )
         else:
             z_score = 0
-            
+
         # Standard Error & T-Score
         standard_error = std_dev / math.sqrt(count) if count > 0 else 0
         t_score = mean_pl / standard_error if standard_error > 0 else 0
-        
+
         # Trades per Day
         unique_days = set(t.close_date.date() for t in trade_list)
         trades_per_day = count / len(unique_days) if unique_days else 0
 
         # Consistency Ratio (Sharpe-like but often defined as Mean/StdDev)
-        consistency_ratio = sharpe # In this context, they are often used interchangeably
+        consistency_ratio = sharpe  # In this context, they are often used interchangeably
 
         return {
-            'expectancy': expectancy,
-            'max_dd': max_dd,
-            'max_dd_date': max_dd_date,
-            'max_dd_duration': max_dd_duration,
-            'recovery_factor': recovery_factor,
-            'calmar': calmar,
-            'z_score': z_score,
-            'equity_peak': peak,
-            'trades_per_day': trades_per_day,
-            'standard_error': standard_error,
-            't_score': t_score,
-            'edge_score': edge_score,
-            'payoff_ratio': payoff_ratio,
-            'sqn': sqn,
-            'sharpe': sharpe,
-            'sortino': sortino,
-            'consistency_ratio': consistency_ratio,
-            'kelly': kelly * 100,
-            'std_dev': std_dev,
-            'avg_time_win': avg_time_win,
-            'pf_long': pf_long,
-            'pf_short': pf_short,
-            'wr_long': wr_long,
-            'wr_short': wr_short,
-            'max_consec_wins': max_mod_wins,
-            'max_consec_wins_dates': max_wins_date,
-            'max_consec_losses': max_mod_losses,
-            'max_consec_losses_dates': max_losses_date,
-            'win_loss_ratio': win_loss_ratio,
-            'gain_to_pain': gain_to_pain,
-            'avg_win': avg_win,
-            'avg_loss': avg_loss
+            "expectancy": expectancy,
+            "max_dd": max_dd,
+            "max_dd_date": max_dd_date,
+            "max_dd_duration": max_dd_duration,
+            "recovery_factor": recovery_factor,
+            "calmar": calmar,
+            "z_score": z_score,
+            "equity_peak": peak,
+            "trades_per_day": trades_per_day,
+            "standard_error": standard_error,
+            "t_score": t_score,
+            "edge_score": edge_score,
+            "payoff_ratio": payoff_ratio,
+            "sqn": sqn,
+            "sharpe": sharpe,
+            "sortino": sortino,
+            "consistency_ratio": consistency_ratio,
+            "kelly": kelly * 100,
+            "std_dev": std_dev,
+            "avg_time_win": avg_time_win,
+            "pf_long": pf_long,
+            "pf_short": pf_short,
+            "wr_long": wr_long,
+            "wr_short": wr_short,
+            "max_consec_wins": max_mod_wins,
+            "max_consec_wins_dates": max_wins_date,
+            "max_consec_losses": max_mod_losses,
+            "max_consec_losses_dates": max_losses_date,
+            "win_loss_ratio": win_loss_ratio,
+            "gain_to_pain": gain_to_pain,
+            "avg_win": avg_win,
+            "avg_loss": avg_loss,
         }
 
     # --- Annual Data Aggregation ---
     trades_by_year = collections.defaultdict(list)
     for t in closed_trades:
-        trades_by_year[t.close_date.strftime('%Y')].append(t)
+        trades_by_year[t.close_date.strftime("%Y")].append(t)
 
     years = sorted(trades_by_year.keys())
 
@@ -1254,85 +1608,76 @@ def generate_html_report(closed_trades, expenses_by_day, floating_positions=None
 
     # "All"
     all_stats = calculate_kpis(closed_trades)
-    all_stats['expenses'] = sum(expenses_by_year.values())
-    annual_stats['All'] = all_stats
-    annual_charts['All'] = get_chart_data(closed_trades)
+    all_stats["expenses"] = sum(expenses_by_year.values())
+    annual_stats["All"] = all_stats
+    annual_charts["All"] = get_chart_data(closed_trades)
 
     # Years
     for y in years:
         year_stats = calculate_kpis(trades_by_year[y])
-        year_stats['expenses'] = expenses_by_year.get(y, 0.0)
+        year_stats["expenses"] = expenses_by_year.get(y, 0.0)
         annual_stats[y] = year_stats
         annual_charts[y] = get_chart_data(trades_by_year[y])
 
     # JSON Serialization
     annual_stats_json = json.dumps(annual_stats)
     annual_charts_json = json.dumps(annual_charts)
-    available_years_json = json.dumps(['All'] + years)
+    available_years_json = json.dumps(["All"] + years)
 
     # Tags data for interactive editor (trade_id -> {entry_tag, exit_tag, note})
     all_tags_data = {}
     for t in closed_trades:
         if t.entry_tag or t.exit_tag or t.note:
-            all_tags_data[t.trade_id] = {
-                'entry_tag': t.entry_tag,
-                'exit_tag': t.exit_tag,
-                'note': t.note
-            }
+            all_tags_data[t.trade_id] = {"entry_tag": t.entry_tag, "exit_tag": t.exit_tag, "note": t.note}
     daily_tags_json = json.dumps(all_tags_data)
 
     # Floating positions JSON
-    if floating_positions:
-        floating_json = json.dumps(floating_positions)
-    else:
-        floating_json = json.dumps({'total': 0, 'positions': []})
+    floating_json = json.dumps(floating_positions) if floating_positions else json.dumps({"total": 0, "positions": []})
 
     # --- Daily Data Aggregation ---
     trades_by_day = collections.defaultdict(list)
     for t in closed_trades:
-        trades_by_day[t.close_date.strftime('%Y-%m-%d')].append(t)
+        trades_by_day[t.close_date.strftime("%Y-%m-%d")].append(t)
 
     daily_stats = {}
     for d_key, trades in trades_by_day.items():
         wins = [t for t in trades if t.net_pl > 0]
         losses = [t for t in trades if t.net_pl <= 0]
         total_fees = sum(t.entry_fees + t.exit_fees for t in trades)
-        
+
         stats_all = calculate_gl_stats(trades)
         stats_won = calculate_gl_stats(wins)
         stats_lost = calculate_gl_stats(losses)
         stats_adv = calculate_advanced_stats(trades)
-        
-        daily_stats[d_key] = {
-            'pnl': sum(t.net_pl for t in trades),
-            'count': len(trades),
-            'fees': total_fees,
-            'locates': 0.0,
-            'trades': [t.to_dict() for t in trades],
-            'stats': {
-                'all': stats_all,
-                'won': stats_won,
-                'lost': stats_lost,
-                'advanced': stats_adv
-            }
 
+        daily_stats[d_key] = {
+            "pnl": sum(t.net_pl for t in trades),
+            "count": len(trades),
+            "fees": total_fees,
+            "locates": 0.0,
+            "trades": [t.to_dict() for t in trades],
+            "stats": {"all": stats_all, "won": stats_won, "lost": stats_lost, "advanced": stats_adv},
         }
 
     # Merge Expenses into Daily Stats
     for d_key, cost in expenses_by_day.items():
         if d_key not in daily_stats:
             daily_stats[d_key] = {
-                'pnl': 0.0, 'count': 0, 'fees': 0.0, 'locates': 0.0, 'trades': [],
-                'stats': {'all': {}, 'won': {}, 'lost': {}, 'advanced': {}} # Empty stats
+                "pnl": 0.0,
+                "count": 0,
+                "fees": 0.0,
+                "locates": 0.0,
+                "trades": [],
+                "stats": {"all": {}, "won": {}, "lost": {}, "advanced": {}},  # Empty stats
             }
 
-        daily_stats[d_key]['locates'] += cost
+        daily_stats[d_key]["locates"] += cost
 
     # Monthly/Daily Context (Equity Curves etc)
     monthly_pl = collections.defaultdict(float)
-    monthly_equity_curves = collections.defaultdict(lambda: {'labels': [], 'data': []})
-    daily_equity_curves = collections.defaultdict(lambda: {'labels': [], 'data': []})
-    
+    monthly_equity_curves = collections.defaultdict(lambda: {"labels": [], "data": []})
+    daily_equity_curves = collections.defaultdict(lambda: {"labels": [], "data": []})
+
     current_month_pl = collections.defaultdict(float)
     current_day_pl = collections.defaultdict(float)
     day_trade_idx = collections.defaultdict(int)
@@ -1341,23 +1686,20 @@ def generate_html_report(closed_trades, expenses_by_day, floating_positions=None
     closed_trades.sort(key=lambda x: x.close_date)
 
     for t in closed_trades:
-        m_key = t.close_date.strftime('%Y-%m')
-        d_key = t.close_date.strftime('%Y-%m-%d')
+        m_key = t.close_date.strftime("%Y-%m")
+        d_key = t.close_date.strftime("%Y-%m-%d")
 
         monthly_pl[m_key] += t.net_pl
 
         current_month_pl[m_key] += t.net_pl
-        monthly_equity_curves[m_key]['labels'].append(t.close_date.strftime('%d/%b'))
-        monthly_equity_curves[m_key]['data'].append(round(current_month_pl[m_key], 2))
+        monthly_equity_curves[m_key]["labels"].append(t.close_date.strftime("%d/%b"))
+        monthly_equity_curves[m_key]["data"].append(round(current_month_pl[m_key], 2))
 
         current_day_pl[d_key] += t.net_pl
         day_trade_idx[d_key] += 1
-        if day_trade_idx[d_key] == 1:
-            label = t.open_date.strftime('%H:%M')
-        else:
-            label = t.close_date.strftime('%H:%M')
-        daily_equity_curves[d_key]['labels'].append(label)
-        daily_equity_curves[d_key]['data'].append(round(current_day_pl[d_key], 2))
+        label = t.open_date.strftime("%H:%M") if day_trade_idx[d_key] == 1 else t.close_date.strftime("%H:%M")
+        daily_equity_curves[d_key]["labels"].append(label)
+        daily_equity_curves[d_key]["data"].append(round(current_day_pl[d_key], 2))
 
     monthly_equity_json = json.dumps(monthly_equity_curves)
     daily_equity_json = json.dumps(daily_equity_curves)
@@ -1366,7 +1708,7 @@ def generate_html_report(closed_trades, expenses_by_day, floating_positions=None
     # --- Screenshots (Capturas de trades) ---
     screenshots_data = {}
     if os.path.isdir(SCREENSHOTS_DIR):
-        date_pat = re.compile(r'(\d{4})-(\d{2})-(\d{2})')
+        date_pat = re.compile(r"(\d{4})-(\d{2})-(\d{2})")
         for fname in os.listdir(SCREENSHOTS_DIR):
             fpath = os.path.join(SCREENSHOTS_DIR, fname)
             if not os.path.isfile(fpath):
@@ -1376,13 +1718,10 @@ def generate_html_report(closed_trades, expenses_by_day, floating_positions=None
                 continue
             date_str = f"{m.group(1)}-{m.group(2)}-{m.group(3)}"
             # Extract probable ticker from text before date
-            prefix = fname[:m.start()].strip().rstrip('_- ')
-            words = re.findall(r'\b[A-Za-z]{1,5}\b', prefix)
+            prefix = fname[: m.start()].strip().rstrip("_- ")
+            words = re.findall(r"\b[A-Za-z]{1,5}\b", prefix)
             symbol = words[-1].upper() if words else ""
-            screenshots_data.setdefault(date_str, []).append({
-                'symbol': symbol,
-                'file': fname
-            })
+            screenshots_data.setdefault(date_str, []).append({"symbol": symbol, "file": fname})
     screenshots_json = json.dumps(screenshots_data)
 
     # --- Obsidian Journal Entries ---
@@ -1403,7 +1742,7 @@ def generate_html_report(closed_trades, expenses_by_day, floating_positions=None
                 date_key = f"{year}-{month}-{day}"
                 fpath = os.path.join(month_path, fname)
                 try:
-                    with open(fpath, 'r', encoding='utf-8') as f:
+                    with open(fpath, encoding="utf-8") as f:
                         md_text = f.read()
                 except Exception:
                     continue
@@ -1414,33 +1753,33 @@ def generate_html_report(closed_trades, expenses_by_day, floating_positions=None
     journal_json = json.dumps(journal_data)
 
     monthly_data_json = json.dumps(monthly_pl)
-    
+
     # Monthly Symbols & Context Stats
-    monthly_symbols = collections.defaultdict(lambda: collections.defaultdict(lambda: {'pnl': 0.0, 'count': 0}))
+    monthly_symbols = collections.defaultdict(lambda: collections.defaultdict(lambda: {"pnl": 0.0, "count": 0}))
     for t in closed_trades:
-        m_key = t.close_date.strftime('%Y-%m')
-        monthly_symbols[m_key][t.symbol]['pnl'] += t.net_pl
-        monthly_symbols[m_key][t.symbol]['count'] += 1
-        
+        m_key = t.close_date.strftime("%Y-%m")
+        monthly_symbols[m_key][t.symbol]["pnl"] += t.net_pl
+        monthly_symbols[m_key][t.symbol]["count"] += 1
+
     monthly_symbols_list = {}
     for m_key, sym_dict in monthly_symbols.items():
-        s_list = [{'symbol': s, 'pnl': d['pnl'], 'count': d['count']} for s, d in sym_dict.items()]
-        s_list.sort(key=lambda x: x['pnl'], reverse=True)
+        s_list = [{"symbol": s, "pnl": d["pnl"], "count": d["count"]} for s, d in sym_dict.items()]
+        s_list.sort(key=lambda x: x["pnl"], reverse=True)
         monthly_symbols_list[m_key] = s_list
     monthly_symbols_json = json.dumps(monthly_symbols_list)
-    
+
     monthly_context_stats = {}
     monthly_gain_loss_stats = {}
 
     def calculate_tag_metrics(trade_list):
         tag_dict = collections.defaultdict(list)
         for t in trade_list:
-            t_tag = (t.entry_tag or t.tag).strip() if hasattr(t, 'entry_tag') else ''
+            t_tag = (t.entry_tag or t.tag).strip() if hasattr(t, "entry_tag") else ""
             if not t_tag:
-                tag_dict['Untagged'].append(t)
+                tag_dict["Untagged"].append(t)
             else:
                 # Split comma-separated tags
-                for single_tag in t_tag.split(','):
+                for single_tag in t_tag.split(","):
                     single_tag = single_tag.strip()
                     if single_tag:
                         tag_dict[single_tag].append(t)
@@ -1455,27 +1794,25 @@ def generate_html_report(closed_trades, expenses_by_day, floating_positions=None
             # Include individual trades for expandable view
             trade_list_data = []
             for t in trades:
-                trade_list_data.append({
-                    'symbol': t.symbol,
-                    'dir': t.direction,
-                    'entry': round(t.entry_price, 4),
-                    'exit': round(t.exit_price, 4),
-                    'qty': t.quantity,
-                    'pl': round(t.net_pl, 2),
-                    'date': t.close_date.strftime('%Y-%m-%d'),
-                    'exit_tag': t.exit_tag if hasattr(t, 'exit_tag') else '',
-                    'note': t.note if hasattr(t, 'note') else ''
-                })
+                trade_list_data.append(
+                    {
+                        "symbol": t.symbol,
+                        "dir": t.direction,
+                        "entry": round(t.entry_price, 4),
+                        "exit": round(t.exit_price, 4),
+                        "qty": t.quantity,
+                        "pl": round(t.net_pl, 2),
+                        "date": t.close_date.strftime("%Y-%m-%d"),
+                        "exit_tag": t.exit_tag if hasattr(t, "exit_tag") else "",
+                        "note": t.note if hasattr(t, "note") else "",
+                    }
+                )
             # Sort trades by date
-            trade_list_data.sort(key=lambda x: x['date'])
-            results.append({
-                'tag': tag,
-                'count': count,
-                'win_rate': win_rate,
-                'avg_pl': avg_pl,
-                'trades': trade_list_data
-            })
-        results.sort(key=lambda x: x['count'], reverse=True)
+            trade_list_data.sort(key=lambda x: x["date"])
+            results.append(
+                {"tag": tag, "count": count, "win_rate": win_rate, "avg_pl": avg_pl, "trades": trade_list_data}
+            )
+        results.sort(key=lambda x: x["count"], reverse=True)
         return results
 
     def calculate_weekday_metrics(trade_list):
@@ -1484,83 +1821,86 @@ def generate_html_report(closed_trades, expenses_by_day, floating_positions=None
         for t in trade_list:
             wd = t.close_date.weekday()
             weekday_dict[wd].append(t)
-        
+
         results = []
         # Days names mapping
-        days = ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday', 'Sunday']
-        
+        days = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"]
+
         for wd, trades in weekday_dict.items():
             count = len(trades)
             wins = [t for t in trades if t.net_pl > 0]
             win_rate = (len(wins) / count * 100) if count > 0 else 0
             total_pl = sum(t.net_pl for t in trades)
             avg_pl = total_pl / count if count > 0 else 0
-            
-            results.append({
-                'day_name': days[wd],
-                'day_index': wd,
-                'count': count,
-                'win_rate': win_rate,
-                'total_pl': total_pl,
-                'avg_pl': avg_pl
-            })
-            
+
+            results.append(
+                {
+                    "day_name": days[wd],
+                    "day_index": wd,
+                    "count": count,
+                    "win_rate": win_rate,
+                    "total_pl": total_pl,
+                    "avg_pl": avg_pl,
+                }
+            )
+
         # Sort by day index (Monday first)
-        results.sort(key=lambda x: x['day_index'])
+        results.sort(key=lambda x: x["day_index"])
         return results
 
-    for m_key in monthly_symbols.keys():
-        m_trades = [t for t in closed_trades if t.close_date.strftime('%Y-%m') == m_key]
-        
+    for m_key in monthly_symbols:
+        m_trades = [t for t in closed_trades if t.close_date.strftime("%Y-%m") == m_key]
+
         # Context Stats
         stats = calculate_kpis(m_trades)
         monthly_locates = sum(cost for d, cost in expenses_by_day.items() if d.startswith(m_key))
         monthly_context_stats[m_key] = {
-            'win_rate': stats['win_rate'],
-            'profit_factor': stats['profit_factor'],
-            'total_trades': stats['total_trades'],
-            'long_count': stats['long_count'],
-            'short_count': stats['short_count'],
-            'fees': stats['fees'],
-            'locates': monthly_locates,
-            'total_shares': sum(t.quantity for t in m_trades),
-            'avg_win': 0, 'avg_loss': 0
+            "win_rate": stats["win_rate"],
+            "profit_factor": stats["profit_factor"],
+            "total_trades": stats["total_trades"],
+            "long_count": stats["long_count"],
+            "short_count": stats["short_count"],
+            "fees": stats["fees"],
+            "locates": monthly_locates,
+            "total_shares": sum(t.quantity for t in m_trades),
+            "avg_win": 0,
+            "avg_loss": 0,
         }
 
         # Gain Loss Stats
         gl_stats = calculate_gl_stats(m_trades)
-        
+
         # Expenses
         m_cost = 0.0
         for date_str, cost in expenses_by_day.items():
             if date_str.startswith(m_key):
                 m_cost += cost
-        
+
         unique_days = set(t.close_date.date() for t in m_trades)
         traded_days_count = len(unique_days)
         # Avg Daily P&L now reflects only trading P&L
-        avg_daily_pl = gl_stats['total_pl'] / traded_days_count if traded_days_count > 0 else 0.0
+        avg_daily_pl = gl_stats["total_pl"] / traded_days_count if traded_days_count > 0 else 0.0
 
         m_wins_sub = [t for t in m_trades if t.net_pl > 0]
         m_losses_sub = [t for t in m_trades if t.net_pl <= 0]
-        
+
         monthly_gain_loss_stats[m_key] = {
-            'all': gl_stats,
-            'won': calculate_gl_stats(m_wins_sub),
-            'lost': calculate_gl_stats(m_losses_sub),
-            'advanced': calculate_advanced_stats(m_trades),
-            'tags': calculate_tag_metrics(m_trades),
-            'weekdays': calculate_weekday_metrics(m_trades),
-            'expenses': m_cost,
-            'traded_days': traded_days_count,
-            'avg_daily_pl': avg_daily_pl
+            "all": gl_stats,
+            "won": calculate_gl_stats(m_wins_sub),
+            "lost": calculate_gl_stats(m_losses_sub),
+            "advanced": calculate_advanced_stats(m_trades),
+            "tags": calculate_tag_metrics(m_trades),
+            "weekdays": calculate_weekday_metrics(m_trades),
+            "expenses": m_cost,
+            "traded_days": traded_days_count,
+            "avg_daily_pl": avg_daily_pl,
         }
 
     monthly_stats_json = json.dumps(monthly_context_stats)
     monthly_gain_loss_json = json.dumps(monthly_gain_loss_stats)
 
     print(f"DEBUG: Annual Stats Keys: {annual_stats.keys()}")
-    if 'All' in annual_stats:
+    if "All" in annual_stats:
         print(f"DEBUG: All Net PL: {annual_stats['All']['net_pl']}")
 
     # Embed logo as base64
@@ -1592,7 +1932,7 @@ def generate_html_report(closed_trades, expenses_by_day, floating_positions=None
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>{os.environ.get('TRADER_NAME', 'Trading Report')}</title>
+    <title>{os.environ.get("TRADER_NAME", "Trading Report")}</title>
     <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
@@ -1603,25 +1943,25 @@ def generate_html_report(closed_trades, expenses_by_day, floating_positions=None
             --card-bg: rgba(3, 7, 18, 0.7);
             --text-primary: #e2e8f0;
             --text-secondary: #94a3b8;
-            --accent-primary: #00d4ff; 
+            --accent-primary: #00d4ff;
             --accent-primary-dim: rgba(0, 212, 255, 0.15);
-            --accent-green: #39ff14; 
-            --accent-red: #ff003c; 
+            --accent-green: #39ff14;
+            --accent-red: #ff003c;
             --accent-blue: #00d4ff;
             --border-color: rgba(0, 212, 255, 0.3);
             --border-glow: 0 0 10px rgba(0, 212, 255, 0.2), inset 0 0 10px rgba(0, 212, 255, 0.1);
             --hover-bg: rgba(0, 212, 255, 0.1);
         }}
-        
+
         /* Layout & HUD Background */
-        body {{ 
-            display: flex; overflow: hidden; height: 100vh; margin: 0; 
-            font-family: 'Rajdhani', sans-serif; 
-            background-color: var(--bg-color); 
+        body {{
+            display: flex; overflow: hidden; height: 100vh; margin: 0;
+            font-family: 'Rajdhani', sans-serif;
+            background-color: var(--bg-color);
             color: var(--text-primary);
             transition: background-color 0.3s ease;
         }}
-        
+
         /* Circuit Background Canvas */
         #circuit-bg {{
             position: fixed;
@@ -1633,7 +1973,7 @@ def generate_html_report(closed_trades, expenses_by_day, floating_positions=None
             pointer-events: none;
             transition: opacity 0.3s;
         }}
-        
+
         h1, h2, h3, .card-title {{
             font-family: 'Orbitron', sans-serif;
             text-transform: uppercase;
@@ -1657,7 +1997,7 @@ def generate_html_report(closed_trades, expenses_by_day, floating_positions=None
             overflow-y: auto;
             position: relative;
         }}
-        
+
         /* Custom Scrollbar */
         ::-webkit-scrollbar {{ width: 6px; height: 6px; }}
         ::-webkit-scrollbar-track {{ background: rgba(0,0,0,0.2); }}
@@ -1690,31 +2030,31 @@ def generate_html_report(closed_trades, expenses_by_day, floating_positions=None
         }}
         .nav-btn:hover::before {{ transform: translateX(0); }}
         .nav-btn:hover {{ color: var(--accent-primary); border-left-color: var(--accent-primary); text-shadow: 0 0 8px var(--accent-primary); }}
-        .nav-btn.active {{ 
-            background: var(--accent-primary-dim); 
-            color: var(--accent-primary); 
+        .nav-btn.active {{
+            background: var(--accent-primary-dim);
+            color: var(--accent-primary);
             border-left: 3px solid var(--accent-primary);
             text-shadow: 0 0 8px var(--accent-primary);
             box-shadow: inset 10px 0 20px -10px var(--accent-primary);
         }}
-        
+
         .view-section {{ display: none; animation: hudFadeIn 0.4s ease-out forwards; opacity: 0; transform: scale(0.98); }}
         .view-section.active {{ display: block; }}
         @keyframes fadeOut {{ 0% {{ opacity:1; }} 80% {{ opacity:1; }} 100% {{ opacity:0; }} }}
         @keyframes hudFadeIn {{
-            0% {{ opacity: 0; transform: scale(0.98) translateY(10px); filter: blur(4px); }} 
-            100% {{ opacity: 1; transform: scale(1) translateY(0); filter: blur(0); }} 
+            0% {{ opacity: 0; transform: scale(0.98) translateY(10px); filter: blur(4px); }}
+            100% {{ opacity: 1; transform: scale(1) translateY(0); filter: blur(0); }}
         }}
 
         /* HUD Components */
         .grid {{ display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 1.5rem; margin-bottom: 2rem; }}
-        
-        .card {{ 
-            background-color: var(--card-bg); 
+
+        .card {{
+            background-color: var(--card-bg);
             backdrop-filter: blur(10px);
-            border-radius: 4px; 
-            padding: 1.5rem; 
-            border: 1px solid var(--border-color); 
+            border-radius: 4px;
+            padding: 1.5rem;
+            border: 1px solid var(--border-color);
             box-shadow: var(--border-glow);
             position: relative;
             overflow: hidden;
@@ -1747,52 +2087,52 @@ def generate_html_report(closed_trades, expenses_by_day, floating_positions=None
             100% {{ top: 100%; opacity: 0; }}
         }}
 
-        .card-title {{ 
-            color: var(--accent-primary); 
-            font-size: 0.7rem; 
-            margin-bottom: 0.75rem; 
+        .card-title {{
+            color: var(--accent-primary);
+            font-size: 0.7rem;
+            margin-bottom: 0.75rem;
             text-shadow: 0 0 5px rgba(0, 212, 255, 0.5);
         }}
-        .card-value {{ 
+        .card-value {{
             font-family: 'Space Mono', monospace;
-            font-size: 1.75rem; 
-            font-weight: 700; 
+            font-size: 1.75rem;
+            font-weight: 700;
             color: #fff;
             text-shadow: 0 0 10px rgba(255,255,255,0.3);
         }}
         .positive {{ color: var(--accent-green) !important; text-shadow: 0 0 10px rgba(57, 255, 20, 0.4) !important; }}
         .negative {{ color: var(--accent-red) !important; text-shadow: 0 0 10px rgba(255, 0, 60, 0.4) !important; }}
-        
+
         .charts-section {{ display: grid; grid-template-columns: 2fr 1fr; gap: 1.5rem; margin-bottom: 2rem; }}
         .chart-container {{ position: relative; height: 350px; width: 100%; }}
-        
+
         table {{ width: 100%; border-collapse: separate; border-spacing: 0; font-size: 0.9rem; }}
         th, td {{ padding: 0.85rem; border-bottom: 1px solid rgba(0, 212, 255, 0.15); }}
-        th {{ 
-            color: var(--accent-primary); 
+        th {{
+            color: var(--accent-primary);
             font-family: 'Orbitron', sans-serif;
             font-size: 0.7rem;
             letter-spacing: 0.1em;
-            text-transform: uppercase; 
+            text-transform: uppercase;
             background: rgba(0, 212, 255, 0.05);
         }}
         tr:hover td {{ background-color: rgba(0, 212, 255, 0.05); }}
-        
+
         /* Annual Grid */
         .annual-grid {{ display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 1.5rem; }}
-        .month-card {{ 
-            background-color: var(--card-bg); 
-            border: 1px solid var(--border-color); 
-            border-radius: 4px; 
-            padding: 1.5rem; 
-            cursor: pointer; 
-            transition: all 0.2s; 
+        .month-card {{
+            background-color: var(--card-bg);
+            border: 1px solid var(--border-color);
+            border-radius: 4px;
+            padding: 1.5rem;
+            cursor: pointer;
+            transition: all 0.2s;
             box-shadow: var(--border-glow);
             position: relative;
             overflow: hidden;
         }}
-        .month-card:hover {{ 
-            transform: translateY(-2px); 
+        .month-card:hover {{
+            transform: translateY(-2px);
             border-color: var(--accent-primary);
             box-shadow: 0 0 20px rgba(0, 212, 255, 0.3), inset 0 0 15px rgba(0, 212, 255, 0.1);
         }}
@@ -1807,12 +2147,12 @@ def generate_html_report(closed_trades, expenses_by_day, floating_positions=None
 
         /* Calendar */
         .calendar-header {{ display: flex; justify-content: space-between; align-items: center; margin-bottom: 1rem; }}
-        .calendar-nav-btn {{ 
-            background: transparent; 
-            border: 1px solid var(--accent-primary); 
-            color: var(--accent-primary); 
-            padding: 0.4rem 1.2rem; 
-            cursor: pointer; 
+        .calendar-nav-btn {{
+            background: transparent;
+            border: 1px solid var(--accent-primary);
+            color: var(--accent-primary);
+            padding: 0.4rem 1.2rem;
+            cursor: pointer;
             border-radius: 2px;
             font-family: 'Orbitron', sans-serif;
             font-size: 0.75rem;
@@ -1820,21 +2160,21 @@ def generate_html_report(closed_trades, expenses_by_day, floating_positions=None
             box-shadow: 0 0 8px rgba(0, 212, 255, 0.2);
             transition: all 0.2s;
         }}
-        .calendar-nav-btn:hover {{ 
-            background: var(--accent-primary); 
+        .calendar-nav-btn:hover {{
+            background: var(--accent-primary);
             color: #000;
             box-shadow: 0 0 15px var(--accent-primary);
         }}
         .calendar-grid {{ display: grid; grid-template-columns: repeat(6, 1fr); gap: 0.5rem; }}
         .day-name {{ text-align: center; color: var(--accent-primary); font-family: 'Orbitron', sans-serif; font-size: 0.7rem; padding: 0.5rem; letter-spacing: 0.1em; text-transform: uppercase; }}
-        .day-cell {{ 
-            background-color: rgba(15, 23, 42, 0.6); 
-            border-radius: 2px; 
-            min-height: 55px; 
-            padding: 0.5rem; 
-            display: flex; flex-direction: column; justify-content: space-between; 
-            cursor: pointer; 
-            border: 1px solid rgba(0, 212, 255, 0.1); 
+        .day-cell {{
+            background-color: rgba(15, 23, 42, 0.6);
+            border-radius: 2px;
+            min-height: 55px;
+            padding: 0.5rem;
+            display: flex; flex-direction: column; justify-content: space-between;
+            cursor: pointer;
+            border: 1px solid rgba(0, 212, 255, 0.1);
             transition: all 0.2s;
         }}
         .day-cell:hover {{ border-color: var(--accent-primary); box-shadow: 0 0 10px rgba(0, 212, 255, 0.3); transform: scale(1.02); z-index: 2; }}
@@ -1843,11 +2183,11 @@ def generate_html_report(closed_trades, expenses_by_day, floating_positions=None
         .day-number {{ font-family: 'Space Mono', monospace; font-size: 0.75rem; color: var(--text-secondary); margin-bottom: 0.25rem; }}
         .day-pnl {{ font-family: 'Space Mono', monospace; font-size: 0.95rem; font-weight: 700; text-align: right; }}
         .day-trades {{ font-size: 0.65rem; color: var(--text-secondary); text-align: right; text-transform: uppercase; }}
-        .week-total {{ 
-            display: flex; flex-direction: column; justify-content: center; 
-            background-color: rgba(0, 212, 255, 0.05); 
-            border-radius: 2px; padding: 0.5rem; text-align: right; 
-            border: 1px solid var(--border-color); 
+        .week-total {{
+            display: flex; flex-direction: column; justify-content: center;
+            background-color: rgba(0, 212, 255, 0.05);
+            border-radius: 2px; padding: 0.5rem; text-align: right;
+            border: 1px solid var(--border-color);
         }}
         .week-label {{ font-family: 'Orbitron', sans-serif; font-size: 0.65rem; color: var(--accent-primary); text-transform: uppercase; margin-bottom: 0.25rem; letter-spacing: 0.05em; }}
         .bg-green {{ background-color: rgba(57, 255, 20, 0.05); border-color: rgba(57, 255, 20, 0.3); }}
@@ -1907,7 +2247,7 @@ def generate_html_report(closed_trades, expenses_by_day, floating_positions=None
     <aside class="sidebar" style="position: relative; z-index: 10;">
         <div style="margin-bottom: 2rem; text-align: center;">
             <img src="data:image/png;base64,{logo_b64}" style="width: 150px; height: 150px; object-fit: cover; border-radius: 50%; border: 2px solid var(--accent-primary); box-shadow: 0 0 15px var(--accent-primary); margin-bottom: 1rem;">
-            <h2 style="margin:0; font-size:1.8rem; text-transform: none; background: linear-gradient(to right, #60a5fa, #a855f7); -webkit-background-clip: text; -webkit-text-fill-color: transparent; filter: drop-shadow(5px 5px 0px rgba(255, 255, 255, 0.15));">{os.environ.get('TRADER_NAME', 'Trading Report')}</h2>
+            <h2 style="margin:0; font-size:1.8rem; text-transform: none; background: linear-gradient(to right, #60a5fa, #a855f7); -webkit-background-clip: text; -webkit-text-fill-color: transparent; filter: drop-shadow(5px 5px 0px rgba(255, 255, 255, 0.15));">{os.environ.get("TRADER_NAME", "Trading Report")}</h2>
             <p style="font-size: 1.2rem; color: #40E0D0; font-weight: 600;">Performance</p>
         </div>
         <button class="nav-btn active" onclick="switchView('annual')" id="btn-annual">Annual Board</button>
@@ -1955,7 +2295,7 @@ def generate_html_report(closed_trades, expenses_by_day, floating_positions=None
                 <div class="card-title" style="margin-bottom: 1rem;">Circuit Grid Intensity</div>
                 <input type="range" min="0" max="100" value="15" class="slider" id="gridSlider" oninput="updateGrid(this.value)" style="width: 100%; accent-color: var(--accent-primary);">
             </div>
-            
+
             <div style="margin-bottom: 2rem;">
                 <div class="card-title" style="margin-bottom: 1rem;">Interface Mode</div>
                 <div style="display: flex; gap: 0.5rem;">
@@ -2057,7 +2397,7 @@ def generate_html_report(closed_trades, expenses_by_day, floating_positions=None
                                  <tr> <td style="text-align: left;">Avg P&L ($)</td> <td id="gl_avg_won" class="positive">-</td> <td id="gl_avg_lost" class="negative">-</td> </tr>
                                  <tr> <td style="text-align: left;">Avg P&L (%)</td> <td id="gl_pct_won" class="positive">-</td> <td id="gl_pct_lost" class="negative">-</td> </tr>
                                  <tr> <td style="text-align: left;">Trades</td> <td id="gl_count_won">-</td> <td id="gl_count_lost">-</td> </tr>
-                                 
+
                                  <tr style="border-top: 2px solid var(--border-color);"> <td style="text-align: left;">Streak</td> <td id="gl_streak_win">-</td> <td id="gl_streak_loss">-</td> </tr>
                                  <tr> <td style="text-align: left;">Fixed Expenses</td> <td id="gl_expenses" class="negative" colspan="2">-</td> </tr>
                             </tbody>
@@ -2065,7 +2405,7 @@ def generate_html_report(closed_trades, expenses_by_day, floating_positions=None
                      </div>
                 </div>
             </div>
-            
+
             <div class="card" style="margin-bottom: 1rem;">
                 <div class="card-title">Monthly Performance Charts</div>
                 <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 1rem;">
@@ -2095,7 +2435,7 @@ def generate_html_report(closed_trades, expenses_by_day, floating_positions=None
                 <div class="card"><div class="card-title">Trades</div><div class="card-value" id="daily_trades_count">-</div></div>
                 <div class="card"><div class="card-title">Commissions</div><div class="card-value negative" id="daily_commissions">-</div></div>
             </div>
-            
+
             <div class="card" style="margin-bottom: 2rem;">
                  <div class="card-title">Gain / Loss Stats</div>
                  <div style="overflow-x: auto;">
@@ -2106,7 +2446,7 @@ def generate_html_report(closed_trades, expenses_by_day, floating_positions=None
                              <tr> <td style="text-align: left;">Avg P&L ($)</td> <td id="d_gl_avg_won" class="positive">-</td> <td id="d_gl_avg_lost" class="negative">-</td> </tr>
                              <tr> <td style="text-align: left;">Avg P&L (%)</td> <td id="d_gl_pct_won" class="positive">-</td> <td id="d_gl_pct_lost" class="negative">-</td> </tr>
                              <tr> <td style="text-align: left;">Trades</td> <td id="d_gl_count_won">-</td> <td id="d_gl_count_lost">-</td> </tr>
-                             
+
                              <tr style="border-top: 2px solid var(--border-color);"> <td style="text-align: left; font-weight: 700;">Ratios</td> <td id="d_gl_ratio_wl">-</td> <td id="d_gl_ratio_gp">-</td> </tr>
                              <tr> <td style="text-align: left;">Gastos/Locates</td> <td id="d_gl_fees" class="negative">-</td> <td id="d_gl_locates" class="negative">-</td> </tr>
                              <tr> <td style="text-align: left;">Max Drawdown</td> <td>-</td> <td id="d_gl_max_dd" class="negative">-</td> </tr>
@@ -2384,7 +2724,7 @@ def generate_html_report(closed_trades, expenses_by_day, floating_positions=None
             const annualCharts = {annual_charts_json};
         const floatingPos = {floating_json};
             const availableYears = {available_years_json};
-            
+
             const dailyData = {daily_data_json};
             const monthlyData = {monthly_data_json};
             const monthlySymbols = {monthly_symbols_json};
@@ -2840,9 +3180,9 @@ def generate_html_report(closed_trades, expenses_by_day, floating_positions=None
             }})();
 
             let currentView = 'annual';
-            let currentDate = new Date(); 
+            let currentDate = new Date();
             let currentYearView = 'All';
-            
+
             let selectedDayKey = null;
             let monthlyChartInstance = null;
             let monthlyBarChartInstance = null;
@@ -2864,7 +3204,7 @@ def generate_html_report(closed_trades, expenses_by_day, floating_positions=None
                 if (viewName === 'floating') renderFloating();
                 if (viewName === 'buildReport') renderBuildReport();
             }}
-            
+
             function renderAnnual() {{
                 const sel = document.getElementById('yearSelector');
                 if (sel.options.length === 0) {{
@@ -2876,7 +3216,7 @@ def generate_html_report(closed_trades, expenses_by_day, floating_positions=None
                     }});
                     sel.value = currentYearView;
                 }}
-                
+
                 const stats = annualStats[currentYearView];
                 if(stats) {{
                     const grossEl = document.getElementById('annual_gross_pl');
@@ -2898,14 +3238,14 @@ def generate_html_report(closed_trades, expenses_by_day, floating_positions=None
                     document.getElementById('annual_wr').innerText = stats.win_rate.toFixed(2) + '%';
                     document.getElementById('annual_trades').innerText = stats.total_trades;
                 }}
-                
+
                 if (typeof Chart !== 'undefined') updateAnnualCharts();
-                
+
                 const container = document.getElementById('annualMonthGrid');
                 container.innerHTML = '';
                 const allMonths = Object.keys(monthlyData).sort();
                 const visibleMonths = (currentYearView === 'All') ? allMonths : allMonths.filter(m => m.startsWith(currentYearView));
-                
+
                 visibleMonths.forEach(mKey => {{
                     const pl = monthlyData[mKey];
                     const stats = monthlyStats[mKey];
@@ -2916,7 +3256,7 @@ def generate_html_report(closed_trades, expenses_by_day, floating_positions=None
                     container.appendChild(card);
                 }});
             }}
-            
+
             function updateAnnualView() {{
                 currentYearView = document.getElementById('yearSelector').value;
                 renderAnnual();
@@ -2925,29 +3265,29 @@ def generate_html_report(closed_trades, expenses_by_day, floating_positions=None
             function updateAnnualCharts() {{
                 const data = annualCharts[currentYearView];
                 if(!data) return;
-                
+
                 const ctxEquity = document.getElementById('equityChartAnnual').getContext('2d');
                 if(annualEquityChart) annualEquityChart.destroy();
-                annualEquityChart = new Chart(ctxEquity, {{ 
-                    type: 'line', 
-                    data: {{ 
-                        labels: data.equity.labels, 
-                        datasets: [{{ 
-                            label: 'Cumulative P&L', 
-                            data: data.equity.data, 
-                            borderColor: '#10b981', 
-                            backgroundColor: 'rgba(16, 185, 129, 0.1)', 
-                            borderWidth: 2, 
-                            pointRadius: 0, 
+                annualEquityChart = new Chart(ctxEquity, {{
+                    type: 'line',
+                    data: {{
+                        labels: data.equity.labels,
+                        datasets: [{{
+                            label: 'Cumulative P&L',
+                            data: data.equity.data,
+                            borderColor: '#10b981',
+                            backgroundColor: 'rgba(16, 185, 129, 0.1)',
+                            borderWidth: 2,
+                            pointRadius: 0,
                             fill: {{
                                 target: 'origin',
                                 above: 'rgba(16, 185, 129, 0.15)',
                                 below: 'rgba(239, 68, 68, 0.15)'
-                            }}, 
-                            tension: 0.1 
-                        }}] 
-                    }}, 
-                    options: {{ responsive: true, maintainAspectRatio: false, plugins: {{ legend: {{ display: false }} }}, scales: {{ x: {{ ticks: {{ color: '#94a3b8', maxTicksLimit: 20 }}, grid: {{ display: false }} }}, y: {{ grid: {{ color: '#334155' }}, ticks: {{ color: '#94a3b8' }} }} }} }} 
+                            }},
+                            tension: 0.1
+                        }}]
+                    }},
+                    options: {{ responsive: true, maintainAspectRatio: false, plugins: {{ legend: {{ display: false }} }}, scales: {{ x: {{ ticks: {{ color: '#94a3b8', maxTicksLimit: 20 }}, grid: {{ display: false }} }}, y: {{ grid: {{ color: '#334155' }}, ticks: {{ color: '#94a3b8' }} }} }} }}
                 }});
 
                 const ctxDD = document.getElementById('drawdownChartAnnual').getContext('2d');
@@ -2973,18 +3313,18 @@ def generate_html_report(closed_trades, expenses_by_day, floating_positions=None
                 const ctxMonthly = document.getElementById('monthlyChartAnnual').getContext('2d');
                 if(annualMonthlyChart) annualMonthlyChart.destroy();
                 const barColors = data.monthly.data.map(v => v >= 0 ? '#10b981' : '#ef4444');
-                annualMonthlyChart = new Chart(ctxMonthly, {{ 
-                    type: 'bar', 
-                    data: {{ 
-                        labels: data.monthly.labels, 
-                        datasets: [{{ 
-                            label: 'Monthly P&L', 
-                            data: data.monthly.data, 
-                            backgroundColor: barColors, 
-                            borderRadius: 4 
-                        }}] 
-                    }}, 
-                    options: {{ responsive: true, maintainAspectRatio: false, plugins: {{ legend: {{ display: false }} }}, scales: {{ y: {{ grid: {{ color: '#334155' }}, ticks: {{ color: '#94a3b8' }} }}, x: {{ ticks: {{ color: '#94a3b8' }} }} }} }} 
+                annualMonthlyChart = new Chart(ctxMonthly, {{
+                    type: 'bar',
+                    data: {{
+                        labels: data.monthly.labels,
+                        datasets: [{{
+                            label: 'Monthly P&L',
+                            data: data.monthly.data,
+                            backgroundColor: barColors,
+                            borderRadius: 4
+                        }}]
+                    }},
+                    options: {{ responsive: true, maintainAspectRatio: false, plugins: {{ legend: {{ display: false }} }}, scales: {{ y: {{ grid: {{ color: '#334155' }}, ticks: {{ color: '#94a3b8' }} }}, x: {{ ticks: {{ color: '#94a3b8' }} }} }} }}
                 }});
             }}
 
@@ -3003,24 +3343,24 @@ def generate_html_report(closed_trades, expenses_by_day, floating_positions=None
 
                 const grid = document.getElementById('calendarGrid'); grid.innerHTML = '';
                 getDayHeaders().forEach(d => {{ const el = document.createElement('div'); el.className = 'day-name'; el.innerText = d; grid.appendChild(el); }});
-                
+
                 const firstDay = new Date(year, month, 1).getDay();
                 const daysInMonth = new Date(year, month + 1, 0).getDate();
                 const startDay = (firstDay + 6) % 7; // 0=Mon, ... 6=Sun
-                
+
                 // Start Padding (Only Mon-Fri)
                 for(let i=0; i<startDay; i++) {{
                     if(i < 5) grid.appendChild(createEmptyCell());
                 }}
-                
+
                 let weeklyPnl = 0;
                 for(let i=1; i<=daysInMonth; i++) {{
                     const dDateStr = `${{year}}-${{String(month+1).padStart(2, '0')}}-${{String(i).padStart(2, '0')}}`;
                     const dData = dailyData[dDateStr];
                     const dayOfWeek = (startDay + i - 1) % 7; // 0=Mon
-                    
+
                     if(dData) weeklyPnl += dData.pnl;
-                    
+
                     // Render only Mon-Fri (Indices 0-4)
                     if(dayOfWeek < 5) {{
                         const cell = document.createElement('div'); cell.className = 'day-cell';
@@ -3031,14 +3371,14 @@ def generate_html_report(closed_trades, expenses_by_day, floating_positions=None
                         }} else {{ cell.style.opacity = '0.5'; cell.innerHTML = `<div class="day-number">${{i}}</div>`; }}
                         grid.appendChild(cell);
                     }}
-                    
+
                     // End of Week (Sunday=6) -> Append Total
-                    if(dayOfWeek === 6) {{ 
-                        appendWeeklyTotal(grid, weeklyPnl); 
-                        weeklyPnl = 0; 
+                    if(dayOfWeek === 6) {{
+                        appendWeeklyTotal(grid, weeklyPnl);
+                        weeklyPnl = 0;
                     }}
                 }}
-                
+
                 // End Month Padding
                 const endWeekDay = (startDay + daysInMonth - 1) % 7; // 0=Mon
                 // If month ends before Sunday, fill remaining Mon-Fri slots then append total
@@ -3046,7 +3386,7 @@ def generate_html_report(closed_trades, expenses_by_day, floating_positions=None
                     for(let k=endWeekDay+1; k<5; k++) grid.appendChild(createEmptyCell()); // Fill until Friday
                     appendWeeklyTotal(grid, weeklyPnl);
                 }}
-                
+
                 renderMonthlyStatsDashboard(monthKey);
                 renderGainLossStats(monthKey);
                 renderMonthlyTickers(monthKey);
@@ -3061,13 +3401,13 @@ def generate_html_report(closed_trades, expenses_by_day, floating_positions=None
             function renderMonthlyBarChart(monthKey) {{
                 const ctx = document.getElementById('monthlyDailyBarChart').getContext('2d');
                 if(monthlyBarChartInstance) monthlyBarChartInstance.destroy();
-                
+
                 const [y, m] = monthKey.split('-').map(Number);
                 const daysInMonth = new Date(y, m, 0).getDate();
                 const labels = [];
                 const data = [];
                 const bgColors = [];
-                
+
                 for(let i=1; i<=daysInMonth; i++) {{
                     const dStr = `${{y}}-${{String(m).padStart(2,'0')}}-${{String(i).padStart(2,'0')}}`;
                     const d = dailyData[dStr];
@@ -3076,7 +3416,7 @@ def generate_html_report(closed_trades, expenses_by_day, floating_positions=None
                     data.push(val);
                     bgColors.push(val >= 0 ? '#10b981' : '#ef4444');
                 }}
-                
+
                 monthlyBarChartInstance = new Chart(ctx, {{
                     type: 'bar',
                     data: {{
@@ -3088,14 +3428,14 @@ def generate_html_report(closed_trades, expenses_by_day, floating_positions=None
                             borderRadius: 2
                         }}]
                     }},
-                    options: {{ responsive: true, maintainAspectRatio: false, plugins: {{ legend: {{ display: false }} }}, scales: {{ y: {{ grid: {{ color: '#334155' }}, ticks: {{ color: '#94a3b8' }} }}, x: {{ ticks: {{ color: '#94a3b8' }}, grid: {{ display: false }} }} }} }} 
+                    options: {{ responsive: true, maintainAspectRatio: false, plugins: {{ legend: {{ display: false }} }}, scales: {{ y: {{ grid: {{ color: '#334155' }}, ticks: {{ color: '#94a3b8' }} }}, x: {{ ticks: {{ color: '#94a3b8' }}, grid: {{ display: false }} }} }} }}
                 }});
             }}
 
             function renderMonthlyEquityChart(monthKey) {{
                 const ctx = document.getElementById('monthlyEquityChart').getContext('2d');
                 if(monthlyChartInstance) monthlyChartInstance.destroy();
-                
+
                 const data = monthlyEquityData[monthKey] || {{labels: [], data: []}};
                 monthlyChartInstance = new Chart(ctx, {{
                     type: 'line',
@@ -3116,10 +3456,10 @@ def generate_html_report(closed_trades, expenses_by_day, floating_positions=None
                             tension: 0.1
                         }}]
                     }},
-                    options: {{ responsive: true, maintainAspectRatio: false, plugins: {{ legend: {{ display: false }} }}, scales: {{ x: {{ ticks: {{ color: '#94a3b8' }}, grid: {{ display: false }} }}, y: {{ grid: {{ color: '#334155' }}, ticks: {{ color: '#94a3b8' }} }} }} }} 
+                    options: {{ responsive: true, maintainAspectRatio: false, plugins: {{ legend: {{ display: false }} }}, scales: {{ x: {{ ticks: {{ color: '#94a3b8' }}, grid: {{ display: false }} }}, y: {{ grid: {{ color: '#334155' }}, ticks: {{ color: '#94a3b8' }} }} }} }}
                 }});
             }}
-            
+
             function renderMonthlyStatsDashboard(monthKey) {{
                 const container = document.getElementById('monthlyStatsDashboard');
                 const stats = monthlyStats[monthKey];
@@ -3138,10 +3478,10 @@ def generate_html_report(closed_trades, expenses_by_day, floating_positions=None
                     ${{mkCard(t('avgPLPct'), allStats.avg_pct.toFixed(2)+'%', avgPctClass)}}
                 `;
             }}
-            
+
             function renderDaily() {{
                 const header = document.getElementById('dailyDateTitle');
-                const pnlEl = document.getElementById('daily_pnl'); 
+                const pnlEl = document.getElementById('daily_pnl');
                 const tradesEl = document.getElementById('daily_trades_count');
                 const commEl = document.getElementById('daily_commissions');
                 const tbody = document.querySelector('#dailyTradesTable tbody');
@@ -3157,8 +3497,8 @@ def generate_html_report(closed_trades, expenses_by_day, floating_positions=None
                     ssContainer.innerHTML = '<div style="color:var(--text-secondary);font-size:0.9rem;">No screenshots for this day</div>';
                 }} else {{
                     ssContainer.innerHTML = ssData.map(s => `
-                        <div style="cursor:pointer; border:1px solid var(--border-color); border-radius:8px; overflow:hidden; background:var(--card-bg); transition:border-color 0.2s;" onmouseover="this.style.borderColor='var(--accent-primary)'" onmouseout="this.style.borderColor='var(--border-color)'" onclick="window.open('data/Reports_Screenshots/${{encodeURIComponent(s.file)}}', '_blank', 'width=1400,height=900,menubar=no,toolbar=no,location=no,status=no')">
-	                            <img src="data/Reports_Screenshots/${{encodeURIComponent(s.file)}}" loading="lazy" style="width:100%; height:120px; object-fit:cover; display:block;">
+                        <div style="cursor:pointer; border:1px solid var(--border-color); border-radius:8px; overflow:hidden; background:var(--card-bg); transition:border-color 0.2s;" onmouseover="this.style.borderColor='var(--accent-primary)'" onmouseout="this.style.borderColor='var(--border-color)'" onclick="window.open('Reports_Screenshots/${{encodeURIComponent(s.file)}}', '_blank', 'width=1400,height=900,menubar=no,toolbar=no,location=no,status=no')">
+	                            <img src="Reports_Screenshots/${{encodeURIComponent(s.file)}}" loading="lazy" style="width:100%; height:120px; object-fit:cover; display:block;">
                             <div style="padding:4px 8px; font-size:0.75rem; color:var(--accent-primary); font-family:'Orbitron',sans-serif;">${{s.symbol || '??'}}</div>
                         </div>
                     `).join('');
@@ -3178,12 +3518,12 @@ def generate_html_report(closed_trades, expenses_by_day, floating_positions=None
                 commEl.innerText = '$' + data.fees.toLocaleString(undefined, {{minimumFractionDigits: 2, maximumFractionDigits: 2}});
                 const stats = data.stats;
                 if(stats) {{
-                    ['won','lost'].forEach(t => {{ 
-                        const s = stats[t]; 
-                        document.getElementById('d_gl_total_'+t).innerText = '$'+s.total_pl.toLocaleString(undefined, {{minimumFractionDigits: 2, maximumFractionDigits: 2}}); 
-                        document.getElementById('d_gl_avg_'+t).innerText = '$'+s.avg_pl.toLocaleString(undefined, {{minimumFractionDigits: 2, maximumFractionDigits: 2}}); 
-                        document.getElementById('d_gl_pct_'+t).innerText = s.avg_pct.toFixed(2)+'%'; 
-                        document.getElementById('d_gl_count_'+t).innerText = s.count; 
+                    ['won','lost'].forEach(t => {{
+                        const s = stats[t];
+                        document.getElementById('d_gl_total_'+t).innerText = '$'+s.total_pl.toLocaleString(undefined, {{minimumFractionDigits: 2, maximumFractionDigits: 2}});
+                        document.getElementById('d_gl_avg_'+t).innerText = '$'+s.avg_pl.toLocaleString(undefined, {{minimumFractionDigits: 2, maximumFractionDigits: 2}});
+                        document.getElementById('d_gl_pct_'+t).innerText = s.avg_pct.toFixed(2)+'%';
+                        document.getElementById('d_gl_count_'+t).innerText = s.count;
                     }});
                     const adv = stats.advanced;
                     if(adv) {{
@@ -3225,7 +3565,7 @@ def generate_html_report(closed_trades, expenses_by_day, floating_positions=None
                     tbody.appendChild(row);
                 }});
                 if (typeof Chart !== 'undefined') renderDailyEquityChart(selectedDayKey);
-               
+
             }}
 
             function openTagModal(tradeId, symbol, dir, qty, entry, exit, pl) {{
@@ -3513,29 +3853,29 @@ def generate_html_report(closed_trades, expenses_by_day, floating_positions=None
                 const month = currentDate.getMonth();
                 const monthKey = `${{year}}-${{String(month + 1).padStart(2, '0')}}`;
                 document.getElementById('ratiosTitle').innerText = `${{getMonthName(month)}} ${{year}}`;
-                
+
                 const container = document.getElementById('ratiosGrid');
                 container.innerHTML = '';
-                
+
                 const basicStats = monthlyStats[monthKey];
                 const stats = monthlyGainLoss[monthKey];
-                
+
                 if(!basicStats || !stats) {{ container.innerHTML = '<div class="card">No Data</div>'; return; }}
-                
+
                 const mkCard = (title, val, cls='') => `<div class="card" style="height: 80px; padding: 0.5rem; display: flex; flex-direction: column; overflow: hidden; position: relative;"><div class="card-title" style="margin-bottom:0; position:relative; z-index:10;">${{title}}</div><div class="card-value ${{cls}}" style="flex-grow: 1; display: flex; align-items: center; justify-content: flex-start; font-size: 1.5rem; position:relative; z-index:10;">${{val}}</div></div>`;
                 const adv = stats.advanced;
-                
+
                 let html = '';
                 const netPl = stats.all ? stats.all.total_pl : 0;
                 const netPlCls = netPl >= 0 ? 'positive' : 'negative';
                 html += mkCard('Net Profit', '$' + netPl.toLocaleString(undefined, {{minimumFractionDigits: 2, maximumFractionDigits: 2}}), netPlCls);
-                
+
                 const totalTrades = stats.all ? stats.all.count : 0;
                 html += mkCard('Total Trades', totalTrades);
-                
+
                 const winCount = stats.won ? stats.won.count : 0;
                 const lossCount = stats.lost ? stats.lost.count : 0;
-                
+
                 let winValuesRatio = "N/A";
                 if (lossCount > 0) {{
                     const ratio = winCount / lossCount;
@@ -3543,32 +3883,32 @@ def generate_html_report(closed_trades, expenses_by_day, floating_positions=None
                 }} else if (winCount > 0) {{
                     winValuesRatio = winCount + ":0";
                 }}
-                
+
                 html += mkCard('Win Rate (W:1)', winValuesRatio);
-                
+
                 if (adv) {{
                     const shares = basicStats.total_shares || 0;
                     html += mkCard('Shares Traded', shares.toLocaleString(), shares > 0 ? '' : '');
                 }}
-                
+
                 const winPct = totalTrades > 0 ? (winCount / totalTrades * 100) : 0.0;
                 const lossPct = totalTrades > 0 ? (lossCount / totalTrades * 100) : 0.0;
-                
+
                 html += mkCard('Winning Trades', `${{winCount}} <span style="font-size:0.9rem; margin-left: 12px;">(${{winPct.toFixed(2)}}%)</span>`, 'positive');
                 html += mkCard('Losing Trades', `${{lossCount}} <span style="font-size:0.9rem; margin-left: 12px;">(${{lossPct.toFixed(2)}}%)</span>`, 'negative');
-                
+
                 // Replaced Profit Factor with Long/Short Chart
                 // Adjusted height to be more compact (80px to match standard cards)
                 html += '<div class="card" style="height: 80px; padding: 0.5rem; display: flex; flex-direction: column;"><div class="card-title" style="margin-bottom: 0.25rem;">Long vs Short</div><div class="chart-container" style="flex-grow: 1; height: 0; min-height: 0; position: relative;"><canvas id="longShortChart"></canvas></div></div>';
-                
+
                 if(adv) {{
-                    
-                    
+
+
                     const gpVal = adv.gain_to_pain;
                     const gpCls = gpVal >= 1 ? 'positive' : 'negative';
                     const gpDisplay = gpVal === Infinity ? 'Inf' : gpVal.toFixed(2) + ':1';
                     html += mkCard('Gain / Pain Ratio', gpDisplay, gpCls);
-                    
+
                     html += mkCard('Expectancy', '$'+adv.expectancy.toLocaleString(undefined, {{minimumFractionDigits: 2, maximumFractionDigits: 2}}), adv.expectancy>=0?'positive':'negative');
                     html += mkCard('Max Drawdown', '$'+adv.max_dd.toLocaleString(undefined, {{minimumFractionDigits: 2, maximumFractionDigits: 2}}), 'negative');
                     html += mkCard('Max Consec Wins', adv.max_consec_wins, 'positive');
@@ -3576,20 +3916,20 @@ def generate_html_report(closed_trades, expenses_by_day, floating_positions=None
 
                     // --- NEW RATIOS FROM MARKDOWN ---
                     html += '<div style="grid-column: 1 / -1; margin-top: 1rem; border-top: 1px solid var(--border-color); padding-top: 1rem;"><h3 style="color: var(--accent-primary); font-size: 0.9rem;">Advanced Performance Ratios</h3></div>';
-                    
+
                     // Core Performance
                     html += mkCard('Edge Score', adv.edge_score.toFixed(2), adv.edge_score >= 0 ? 'positive' : 'negative');
                     html += mkCard('Recovery Factor', adv.recovery_factor.toFixed(2), adv.recovery_factor >= 1.5 ? 'positive' : '');
                     html += mkCard('Payoff Ratio', adv.payoff_ratio.toFixed(2) + ':1', adv.payoff_ratio >= 1.5 ? 'positive' : '');
                     html += mkCard('Calmar Ratio', adv.calmar.toFixed(2), adv.calmar >= 1.5 ? 'positive' : '');
-                    
+
                     // Risk Adjusted
                     html += mkCard('Sharpe Ratio', adv.sharpe.toFixed(2), adv.sharpe >= 1 ? 'positive' : '');
                     html += mkCard('Sortino Ratio', adv.sortino.toFixed(2), adv.sortino >= 1 ? 'positive' : '');
                     html += mkCard('SQN', adv.sqn.toFixed(2), adv.sqn >= 2 ? 'positive' : '');
                     html += mkCard('Consistency Ratio', adv.consistency_ratio.toFixed(2), adv.consistency_ratio >= 0.1 ? 'positive' : '');
                     html += mkCard('Z-Score', adv.z_score.toFixed(2), Math.abs(adv.z_score) >= 1.96 ? 'positive' : '');
-                    
+
                     // Efficiency
                     html += mkCard('Profit Factor (L)', adv.pf_long === Infinity ? 'Inf' : adv.pf_long.toFixed(2), adv.pf_long >= 1 ? 'positive' : 'negative');
                     html += mkCard('Profit Factor (S)', adv.pf_short === Infinity ? 'Inf' : adv.pf_short.toFixed(2), adv.pf_short >= 1 ? 'positive' : 'negative');
@@ -3600,7 +3940,7 @@ def generate_html_report(closed_trades, expenses_by_day, floating_positions=None
                     // Drawdown & Recovery
                     html += mkCard('Max DD Duration', adv.max_dd_duration + ' Days', 'negative');
                     html += mkCard('Equity Peak', '$' + adv.equity_peak.toLocaleString(undefined, {{maximumFractionDigits: 0}}), 'positive');
-                    
+
                     // Streaks & Consistency
                     html += mkCard('Std Dev P&L', '$' + adv.std_dev.toLocaleString(undefined, {{maximumFractionDigits: 0}}));
                     html += mkCard('Standard Error', adv.standard_error.toFixed(2));
@@ -3612,7 +3952,7 @@ def generate_html_report(closed_trades, expenses_by_day, floating_positions=None
                     // Capital Allocation
                     html += mkCard('Kelly Criterion', adv.kelly.toFixed(2) + '%', adv.kelly > 0 ? 'positive' : 'negative');
                 }}
-                
+
                 // New KPIs requested
                 if (stats.traded_days !== undefined) {{
                     html += mkCard('Traded Days', stats.traded_days);
@@ -3665,7 +4005,7 @@ def generate_html_report(closed_trades, expenses_by_day, floating_positions=None
                         html += '</tbody></table></td></tr>';
                     }});
                     html += '</tbody></table></div></div>';
-                    
+
                     // Weekday Performance Table (1/3 width)
                     if (stats.weekdays) {{
                         html += '<div>';
@@ -3686,21 +4026,21 @@ def generate_html_report(closed_trades, expenses_by_day, floating_positions=None
                         }});
                         html += '</tbody></table></div></div>';
                     }}
-                    
+
                     html += '</div>'; // End grid container
                 }}
-                
+
                 container.innerHTML = html;
-                
+
                 // Render Chart
                 if (typeof Chart !== 'undefined' && basicStats) {{
                     const ctx = document.getElementById('longShortChart').getContext('2d');
                     if (longShortChartInstance) longShortChartInstance.destroy();
-                    
+
                     const total = basicStats.long_count + basicStats.short_count;
                     const longPct = total > 0 ? (basicStats.long_count / total * 100).toFixed(1) + '%' : '0%';
                     const shortPct = total > 0 ? (basicStats.short_count / total * 100).toFixed(1) + '%' : '0%';
-                    
+
                     longShortChartInstance = new Chart(ctx, {{
                         type: 'doughnut',
                         data: {{
@@ -3739,10 +4079,10 @@ def generate_html_report(closed_trades, expenses_by_day, floating_positions=None
                 document.documentElement.style.setProperty('--accent-primary-dim', color + '26'); // 15% alpha
                 document.getElementById('accentHex').innerText = color.toUpperCase();
                 document.getElementById('accentPicker').value = color;
-                
+
                 // Update dynamic shadows
                 document.documentElement.style.setProperty('--border-glow', `0 0 10px ${{color}}33, inset 0 0 10px ${{color}}1A`);
-                
+
                 localStorage.setItem('midge_theme_accent', color);
             }}
 
@@ -3754,7 +4094,7 @@ def generate_html_report(closed_trades, expenses_by_day, floating_positions=None
                 const alpha = (val / 100).toFixed(2);
                 const bgSVG = document.querySelector('.circuit-bg');
                 if (bgSVG) bgSVG.style.opacity = alpha;
-                
+
                 // Update CSS var for other things that might use it
                 const color = getComputedStyle(document.documentElement).getPropertyValue('--accent-primary').trim();
                 document.documentElement.style.setProperty('--accent-primary-dim', color + Math.round(val * 2.55).toString(16).padStart(2, '0'));
@@ -4175,13 +4515,20 @@ def generate_html_report(closed_trades, expenses_by_day, floating_positions=None
 """
     return html
 
-def process_journal(filepath):
+
+def process_journal(filepath: str) -> list[Trade]:
     """Lee trading_journal.parquet y devuelve list[Trade] para Degiro + Tasty STOCK.
 
     Usa Net_USD (ya convertido a dolares) como precio efectivo.
+
+    Args:
+        filepath: Ruta al archivo trading_journal.parquet.
+
+    Returns:
+        Lista de Trade objects. Vacia si faltan dependencias o hay error.
     """
     script_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-    DEGIRO_CUSIP_MAP_PATH = os.path.join(script_dir, 'config', 'degiro_cusip_map.json')
+    DEGIRO_CUSIP_MAP_PATH = os.path.join(script_dir, "config", "degiro_cusip_map.json")
     cusip_map = {}
     if os.path.exists(DEGIRO_CUSIP_MAP_PATH):
         with open(DEGIRO_CUSIP_MAP_PATH) as f:
@@ -4201,10 +4548,10 @@ def process_journal(filepath):
 
     trades = []
     # Incluir Degiro + TODO Tastyworks (STOCK + OPTIONS), excluir ABIERTO
-    mask = (df['Broker'].isin(['Degiro', 'Tastyworks']))
+    mask = df["Broker"].isin(["Degiro", "Tastyworks"])
     # Excluir posiciones abiertas (no realizadas)
-    if 'Status' in df.columns:
-        mask = mask & (df['Status'] != 'ABIERTO')
+    if "Status" in df.columns:
+        mask = mask & (df["Status"] != "ABIERTO")
 
     # Helper para extraer clave de opcion: Symbol.Type.Exp.Strike
     def option_key(desc_text, sym, opt_type):
@@ -4216,24 +4563,24 @@ def process_journal(filepath):
         if len(parts) >= 4:
             opt_type_desc = parts[0].upper()
             exp_str = parts[2]
-            strike = parts[3].split('.')[0]  # quitar decimales si son .0
+            strike = parts[3].split(".")[0]  # quitar decimales si son .0
             try:
-                exp_date = datetime.datetime.strptime(exp_str, '%m/%d/%y')
-                exp_fmt = exp_date.strftime('%y%m%d')
-            except:
-                exp_fmt = exp_str.replace('/', '')
+                exp_date = datetime.datetime.strptime(exp_str, "%m/%d/%y")
+                exp_fmt = exp_date.strftime("%y%m%d")
+            except Exception:
+                exp_fmt = exp_str.replace("/", "")
             return f"{sym}.{opt_type_desc}.{exp_fmt}.{strike}"
         return sym
 
     for _, row in df[mask].iterrows():
         try:
-            broker = row['Broker']
-            date_str = str(row['Date']).strip()
-            bs = str(row['B/S']).strip()
-            symbol = str(row['Symbol']).strip()
-            qty = float(row['Qty'])
-            price_orig = float(row['Price'])
-            net_usd = float(row['Net_USD'])
+            broker = row["Broker"]
+            date_str = str(row["Date"]).strip()
+            bs = str(row["B/S"]).strip()
+            symbol = str(row["Symbol"]).strip()
+            qty = float(row["Qty"])
+            price_orig = float(row["Price"])
+            net_usd = float(row["Net_USD"])
 
             if not date_str or not bs or qty == 0:
                 continue
@@ -4244,7 +4591,7 @@ def process_journal(filepath):
 
             # Parse date
             date = None
-            for fmt in ('%Y-%m-%d', '%m/%d/%Y', '%m/%d/%y', '%d/%m/%Y'):
+            for fmt in ("%Y-%m-%d", "%m/%d/%Y", "%m/%d/%y", "%d/%m/%Y"):
                 try:
                     date = datetime.datetime.strptime(date_str, fmt)
                     break
@@ -4255,19 +4602,19 @@ def process_journal(filepath):
 
             # Normalize action
             action = bs.lower()
-            if action in ('b', 'buy'):
-                action = 'Buy'
-            elif action in ('s', 'sell'):
-                action = 'Sell'
+            if action in ("b", "buy"):
+                action = "Buy"
+            elif action in ("s", "sell"):
+                action = "Sell"
             else:
                 continue
 
             # --- Degiro: mapear CUSIP -> ticker ---
-            if broker == 'Degiro':
+            if broker == "Degiro":
                 ticker = cusip_map.get(symbol, symbol)
                 # USD stocks: usar Price directo (evita distorsion por FX de Degiro)
                 # Non-USD stocks: usar Net_USD/qty como precio efectivo convertido
-                is_us_stock = str(symbol).startswith('US')
+                is_us_stock = str(symbol).startswith("US")
                 if is_us_stock and price_orig > 0:
                     eff_price = price_orig
                 else:
@@ -4276,14 +4623,14 @@ def process_journal(filepath):
                     trades.append(Trade(date, ticker, qty, eff_price, action, 0.0))
 
             # --- Tastyworks STOCK + OPTIONS ---
-            elif broker == 'Tastyworks':
-                opt_type = str(row.get('Type', '') or '')
+            elif broker == "Tastyworks":
+                opt_type = str(row.get("Type", "") or "")
                 # Blank type = STOCK (datos sin clasificar en parquet)
                 if not opt_type:
-                    opt_type = 'STOCK'
+                    opt_type = "STOCK"
                 # Para opciones: usar clave compuesta (Symbol|Type|Exp|Strike)
-                if opt_type in ('PUT', 'CALL'):
-                    desc_text = str(row.get('Desc', '') or '')
+                if opt_type in ("PUT", "CALL"):
+                    desc_text = str(row.get("Desc", "") or "")
                     match_key = option_key(desc_text, symbol, opt_type)
                 else:
                     match_key = symbol
@@ -4298,28 +4645,28 @@ def process_journal(filepath):
     return trades
 
 
-def main():
+def main() -> None:
     # Helper to deduplicate items choosing the maximum count found in any single file
     def merge_item_counts(dir_path, process_func):
         global_max_counts = collections.defaultdict(int)
         if not os.path.exists(dir_path):
             return []
-        
+
         print(f"Scanning directory: {dir_path}...")
         for filename in os.listdir(dir_path):
-            if filename.lower().endswith('.csv'):
+            if filename.lower().endswith(".csv"):
                 filepath = os.path.join(dir_path, filename)
                 print(f"  Reading: {filename}...")
                 items = process_func(filepath)
-                
+
                 # Count frequencies in CURRENT file
                 file_counts = collections.Counter(items)
-                
+
                 # Update global record with the MAX frequency ever seen for each item
                 for item, count in file_counts.items():
                     if count > global_max_counts[item]:
                         global_max_counts[item] = count
-        
+
         # Flatten back to a list
         final_list = []
         for item, count in global_max_counts.items():
@@ -4330,13 +4677,13 @@ def main():
     print("Processing Schwab executions...")
     all_executions = merge_item_counts(SCHWAB_DIR, process_execution_trades)
     print(f"Total deduplicated executions: {len(all_executions)}")
-    
+
     print("Matching execution trades...")
     closed_execution_trades = match_trades(all_executions)
     print(f"Generated {len(closed_execution_trades)} closed trades from executions.")
 
     # 2. Process Historical Journal (trading_journal.parquet) — Degiro + Tasty STOCK
-    JOURNAL_PATH = os.path.join(BASE_DIR, 'data', 'trading_journal.parquet')
+    JOURNAL_PATH = os.path.join(BASE_DIR, "data", "trading_journal.parquet")
     print("Processing Historical Journal (trading_journal.parquet)...")
     journal_trades = []
     if os.path.exists(JOURNAL_PATH):
@@ -4377,13 +4724,18 @@ def main():
     generic_executions = [x for x in all_generic_items if isinstance(x, Trade)]
     generic_closed = [x for x in all_generic_items if isinstance(x, ClosedTrade)]
     closed_generic_trades = match_trades(generic_executions) + generic_closed
-    print(f"Total deduplicated Generic items: {len(all_generic_items)} -> "
-          f"{len(closed_generic_trades)} closed trades.")
+    print(f"Total deduplicated Generic items: {len(all_generic_items)} -> {len(closed_generic_trades)} closed trades.")
 
     # Combine all trades
-    all_closed_trades = (closed_execution_trades + all_alaric_trades + all_mt_trades +
-                         closed_das_trades + closed_tos_trades + closed_generic_trades +
-                         closed_journal_trades)
+    all_closed_trades = (
+        closed_execution_trades
+        + all_alaric_trades
+        + all_mt_trades
+        + closed_das_trades
+        + closed_tos_trades
+        + closed_generic_trades
+        + closed_journal_trades
+    )
     print(f"Total overall closed trades: {len(all_closed_trades)}")
 
     # Apply saved tags from tags.json
@@ -4398,54 +4750,57 @@ def main():
                     # Legacy format: just a string tag
                     t.entry_tag = tag_data
                 else:
-                    t.entry_tag = tag_data.get('entry_tag', '')
-                    t.exit_tag = tag_data.get('exit_tag', '')
-                    t.note = tag_data.get('note', '')
+                    t.entry_tag = tag_data.get("entry_tag", "")
+                    t.exit_tag = tag_data.get("exit_tag", "")
+                    t.note = tag_data.get("note", "")
                 applied += 1
         print(f"Applied saved tags to {applied} trades.")
-    
+
     # 3. Process Expenses (Gastos)
     print("Processing Expenses...")
     all_expense_items = merge_item_counts(GASTOS_DIR, process_gastos)
-    
+
     # Aggregated back to date -> total
     expenses_data = collections.defaultdict(float)
-    for date_key, category, comment, amount in all_expense_items:
+    for date_key, _category, _comment, amount in all_expense_items:
         expenses_data[date_key] += amount
     print(f"Total expense days after deduplication: {len(expenses_data)}.")
 
     print("Generating report...")
     # Cargar posiciones flotantes (abiertas) para mostrarlas aparte
-    JOURNAL_PATH = os.path.join(BASE_DIR, 'data', 'trading_journal.parquet')
-    floating_data = {'total': 0, 'positions': []}
+    JOURNAL_PATH = os.path.join(BASE_DIR, "data", "trading_journal.parquet")
+    floating_data = {"total": 0, "positions": []}
     if os.path.exists(JOURNAL_PATH):
         try:
             import pandas as _pd
+
             _df = _pd.read_parquet(JOURNAL_PATH)
-            _open = _df[_df['Status'] == 'ABIERTO']
+            _open = _df[_df["Status"] == "ABIERTO"]
             # Filtrar opciones o posiciones que parezcan opciones (VZIO symbol raro)
-            _open = _open[~_open['Symbol'].str.contains(r'[A-Z]+\s+\d+[CP]', na=False)]
+            _open = _open[~_open["Symbol"].str.contains(r"[A-Z]+\s+\d+[CP]", na=False)]
             if len(_open) > 0:
-                floating_data['total'] = _open['Net_USD'].abs().sum()
+                floating_data["total"] = _open["Net_USD"].abs().sum()
                 for _, r in _open.iterrows():
-                    floating_data['positions'].append({
-                        'symbol': r['Symbol'],
-                        'date': str(r['Date']),
-                        'qty': str(int(abs(float(r['Qty'])))),
-                        'price': round(float(r['Price']), 2),
-                        'invested': round(abs(float(r['Net_USD'])), 2)
-                    })
+                    floating_data["positions"].append(
+                        {
+                            "symbol": r["Symbol"],
+                            "date": str(r["Date"]),
+                            "qty": str(int(abs(float(r["Qty"])))),
+                            "price": round(float(r["Price"]), 2),
+                            "invested": round(abs(float(r["Net_USD"])), 2),
+                        }
+                    )
         except Exception as e:
             print(f"  ⚠️ Error cargando flotantes: {e}")
 
     html_content = generate_html_report(all_closed_trades, expenses_data, floating_positions=floating_data)
     try:
-        with open(OUTPUT_FILE, 'w', encoding='utf-8') as f:
+        with open(OUTPUT_FILE, "w", encoding="utf-8") as f:
             f.write(html_content)
         print(f"Success! Report saved to {OUTPUT_FILE}")
     except Exception as e:
         print(f"Error writing HTML: {e}")
 
+
 if __name__ == "__main__":
     main()
-
