@@ -1539,11 +1539,10 @@ def generate_html_report(
 
         recovery_factor = total_pl / abs(max_dd) if max_dd != 0 else (float("inf") if total_pl > 0 else 0)
 
-        # Denominador base: usa el mayor entre el equity peak al momento del
-        # drawdown máximo y el valor absoluto del mínimo de equidad del período.
-        dd_denom = max(peak_at_max, abs(min_cum), 1)
         if max_dd != 0:
-            max_dd_pct = abs(max_dd) / dd_denom * 100
+            # Max DD % contra el Net Profit del período (lo que el KPI card muestra)
+            # Refleja cuántas veces el drawdown superó a la ganancia neta
+            max_dd_pct = abs(max_dd) / max(abs(total_pl), 1) * 100
             if peak > 0:
                 # MAR Ratio = Retorno%Local / MaxDD%Global
                 # Se diferencia del Recovery Factor (NetProfit/MaxDD$) al usar
@@ -1551,7 +1550,7 @@ def generate_html_report(
                 # Retorno% contra equity peak LOCAL del período
                 retorno_base = max(peak, 1)
                 retorno_pct = total_pl / retorno_base * 100
-                # MaxDD% (ya calculado con dd_denom que incluye global_peak)
+                # MaxDD% (ya calculado contra Net Profit del período)
                 max_dd_dec = max_dd_pct / 100
                 # Calcular retorno para MAR: simple (< 60d) o CAGR anualizado (>= 60d)
                 if len(sorted_trades) >= 2:
