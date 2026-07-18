@@ -341,7 +341,7 @@ class ClosedTrade:
             self.gross_pl = cost_basis - proceeds
 
         self.net_pl = self.gross_pl - total_fees
-        self.duration = (close_date - open_date).days
+        self.duration = (close_date - open_date).total_seconds() / 86400  # Fracción de días
 
         if cost_basis > 0:
             self.roi_pct = (self.net_pl / cost_basis) * 100
@@ -1366,6 +1366,12 @@ def generate_html_report(
                 "expectancy": 0.0,
                 "max_dd": 0.0,
                 "max_dd_date": "-",
+                "max_dd_duration": 0,
+                "mar_ratio": 0.0,
+                "max_dd_pct": 0.0,
+                "ulcer_index": 0.0,
+                "profit_factor_general": 0.0,
+                "avg_hold_time": 0.0,
                 "max_consec_wins": 0,
                 "max_consec_wins_dates": "-",
                 "max_consec_losses": 0,
@@ -1432,6 +1438,8 @@ def generate_html_report(
         max_dd_date = "-"
         peak_date = None
         max_dd_duration = 0  # Days
+        ulcer_dd_squares = []  # For Ulcer Index: squared % drawdowns
+        peak_at_max = 0  # Track peak value for Max DD %
 
         # Streaks
         current_streak_type = 0  # 1 win, -1 loss
@@ -1475,10 +1483,16 @@ def generate_html_report(
             if dd < max_dd:
                 max_dd = dd
                 max_dd_date = t.close_date.strftime("%Y-%m-%d")
+                peak_at_max = peak  # Capture peak at time of max DD
                 if peak_date:
                     duration = (t.close_date - peak_date).days
                     if duration > max_dd_duration:
                         max_dd_duration = duration
+
+            # Ulcer Index: collect squared % drawdown from peak
+            if peak > 0:
+                dd_pct = abs(dd) / peak * 100
+                ulcer_dd_squares.append(dd_pct ** 2)
 
             # Streaks
             is_win = t.gross_pl > 0
@@ -1520,8 +1534,24 @@ def generate_html_report(
 
         recovery_factor = total_pl / abs(max_dd) if max_dd != 0 else (float("inf") if total_pl > 0 else 0)
 
-        # Calmar Ratio (Simplified: NetPL / MaxDD)
-        calmar = recovery_factor  # Usually annualized, but here we use total period
+        # MAR Ratio (versión mensual) = Retorno% / MaxDD%
+        # Retorno% = P&L neto / equity peak actual * 100
+        # MaxDD%   = max drawdown / equity peak al momento del drawdown * 100
+        # Al usar distintos peaks, da un resultado diferente al Recovery Factor
+        if peak > 0 and max_dd != 0:
+            retorno_pct = total_pl / peak * 100
+            max_dd_pct = abs(max_dd) / peak_at_max * 100 if peak_at_max > 0 else 0
+            mar_ratio = retorno_pct / max_dd_pct if max_dd_pct > 0 else (float("inf") if retorno_pct > 0 else 0)
+        else:
+            retorno_pct = 0
+            max_dd_pct = 0
+            mar_ratio = 0
+
+        # Ulcer Index — sqrt(mean of squared % drawdowns)
+        ulcer_index = math.sqrt(sum(ulcer_dd_squares) / len(ulcer_dd_squares)) if ulcer_dd_squares else 0
+
+        # Profit Factor General (global: gross_wins / gross_losses)
+        profit_factor_general = sum_wins / sum_losses if sum_losses > 0 else (float("inf") if sum_wins > 0 else 0)
 
         # Z-Score (Streaks)
         # WWLLW -> streaks: WW, LL, W -> 3 streaks
@@ -1543,16 +1573,15 @@ def generate_html_report(
         else:
             z_score = 0
 
-        # Standard Error & T-Score
+        # Standard Error
         standard_error = std_dev / math.sqrt(count) if count > 0 else 0
-        t_score = mean_pl / standard_error if standard_error > 0 else 0
 
         # Trades per Day
-        unique_days = set(t.close_date.date() for t in trade_list)
+        unique_days = set(t.close_date.date() for t in trade_list) if trade_list else set()
         trades_per_day = count / len(unique_days) if unique_days else 0
 
-        # Consistency Ratio (Sharpe-like but often defined as Mean/StdDev)
-        consistency_ratio = sharpe  # In this context, they are often used interchangeably
+        # Average Hold Time (general, all trades)
+        avg_hold_time = sum(t.duration for t in trade_list) / count if count > 0 else 0
 
         return {
             "expectancy": expectancy,
@@ -1560,18 +1589,20 @@ def generate_html_report(
             "max_dd_date": max_dd_date,
             "max_dd_duration": max_dd_duration,
             "recovery_factor": recovery_factor,
-            "calmar": calmar,
+            "mar_ratio": mar_ratio,
+            "max_dd_pct": max_dd_pct,
+            "ulcer_index": ulcer_index,
+            "profit_factor_general": profit_factor_general,
             "z_score": z_score,
             "equity_peak": peak,
             "trades_per_day": trades_per_day,
             "standard_error": standard_error,
-            "t_score": t_score,
+            "avg_hold_time": avg_hold_time,
             "edge_score": edge_score,
             "payoff_ratio": payoff_ratio,
             "sqn": sqn,
             "sharpe": sharpe,
             "sortino": sortino,
-            "consistency_ratio": consistency_ratio,
             "kelly": kelly * 100,
             "std_dev": std_dev,
             "avg_time_win": avg_time_win,
@@ -2820,18 +2851,21 @@ def generate_html_report(
                     longVsShort: "Long vs Short",
                     gainPainRatio: "Gain / Pain Ratio",
                     expectancy: "Expectancy",
+                    maxDrawdown: "Max Drawdown",
+                    maxDDPct: "Max DD %",
                     maxConsecWins: "Max Consec Wins",
                     maxConsecLosses: "Max Consec Losses",
                     advancedPerformanceRatios: "Advanced Performance Ratios",
                     edgeScore: "Edge Score",
                     recoveryFactor: "Recovery Factor",
                     payoffRatio: "Payoff Ratio",
-                    calmarRatio: "Calmar Ratio",
+                    marRatio: "MAR Ratio",
                     sharpeRatio: "Sharpe Ratio",
                     sortinoRatio: "Sortino Ratio",
                     sqn: "SQN",
-                    consistencyRatio: "Consistency Ratio",
+                    ulcerIndex: "Ulcer Index",
                     zScore: "Z-Score",
+                    profitFactor: "Profit Factor",
                     profitFactorL: "Profit Factor (L)",
                     profitFactorS: "Profit Factor (S)",
                     winRateL: "Win Rate (L)",
@@ -2841,7 +2875,7 @@ def generate_html_report(
                     equityPeak: "Equity Peak",
                     stdDevPL: "Std Dev P&L",
                     standardError: "Standard Error",
-                    tScore: "T-Score",
+                    avgHoldTime: "Avg Hold Time",
                     avgTimeWin: "Avg Time Win",
                     kellyCriterion: "Kelly Criterion",
                     tradedDays: "Traded Days",
@@ -2965,16 +2999,19 @@ def generate_html_report(
                     expectancy: "Expectativa",
                     maxConsecWins: "Max Ganados Consec",
                     maxConsecLosses: "Max Perdidos Consec",
+                    maxDrawdown: "Drawdown Max",
+                    maxDDPct: "DD Max %",
                     advancedPerformanceRatios: "Ratios de Rendimiento Avanzados",
                     edgeScore: "Edge Score",
                     recoveryFactor: "Factor de Recuperacion",
                     payoffRatio: "Payoff Ratio",
-                    calmarRatio: "Calmar Ratio",
+                    marRatio: "MAR Ratio",
                     sharpeRatio: "Sharpe Ratio",
                     sortinoRatio: "Sortino Ratio",
                     sqn: "SQN",
-                    consistencyRatio: "Ratio de Consistencia",
+                    ulcerIndex: "Ulcer Index",
                     zScore: "Z-Score",
+                    profitFactor: "Factor Ganancia",
                     profitFactorL: "Factor Ganancia (L)",
                     profitFactorS: "Factor Ganancia (S)",
                     winRateL: "Tasa Acierto (L)",
@@ -2984,7 +3021,7 @@ def generate_html_report(
                     equityPeak: "Pico de Equidad",
                     stdDevPL: "Desviacion Estandar P&L",
                     standardError: "Error Estandar",
-                    tScore: "T-Score",
+                    avgHoldTime: "Tiempo Prom Retención",
                     avgTimeWin: "Tiempo Prom Ganador",
                     kellyCriterion: "Criterio de Kelly",
                     tradedDays: "Dias Tradeados",
@@ -3863,6 +3900,15 @@ def generate_html_report(
                 if(!basicStats || !stats) {{ container.innerHTML = '<div class="card">No Data</div>'; return; }}
 
                 const mkCard = (title, val, cls='') => `<div class="card" style="height: 80px; padding: 0.5rem; display: flex; flex-direction: column; overflow: hidden; position: relative;"><div class="card-title" style="margin-bottom:0; position:relative; z-index:10;">${{title}}</div><div class="card-value ${{cls}}" style="flex-grow: 1; display: flex; align-items: center; justify-content: flex-start; font-size: 1.5rem; position:relative; z-index:10;">${{val}}</div></div>`;
+                const fmtDuration = (days) => {{
+                    const totalH = days * 24;
+                    const d = Math.floor(days);
+                    const h = Math.floor((totalH - d * 24));
+                    const m = Math.round((totalH - d * 24 - h) * 60);
+                    if (d > 0) return d + 'd ' + h + 'h ' + m + 'm';
+                    if (h > 0) return h + 'h ' + m + 'm';
+                    return m + 'm';
+                }};
                 const adv = stats.advanced;
 
                 let html = '';
@@ -3911,6 +3957,7 @@ def generate_html_report(
 
                     html += mkCard('Expectancy', '$'+adv.expectancy.toLocaleString(undefined, {{minimumFractionDigits: 2, maximumFractionDigits: 2}}), adv.expectancy>=0?'positive':'negative');
                     html += mkCard('Max Drawdown', '$'+adv.max_dd.toLocaleString(undefined, {{minimumFractionDigits: 2, maximumFractionDigits: 2}}), 'negative');
+                    html += mkCard('Max DD %', adv.max_dd_pct.toFixed(2) + '%', 'negative');
                     html += mkCard('Max Consec Wins', adv.max_consec_wins, 'positive');
                     html += mkCard('Max Consec Losses', adv.max_consec_losses, 'negative');
 
@@ -3918,19 +3965,19 @@ def generate_html_report(
                     html += '<div style="grid-column: 1 / -1; margin-top: 1rem; border-top: 1px solid var(--border-color); padding-top: 1rem;"><h3 style="color: var(--accent-primary); font-size: 0.9rem;">Advanced Performance Ratios</h3></div>';
 
                     // Core Performance
-                    html += mkCard('Edge Score', adv.edge_score.toFixed(2), adv.edge_score >= 0 ? 'positive' : 'negative');
                     html += mkCard('Recovery Factor', adv.recovery_factor.toFixed(2), adv.recovery_factor >= 1.5 ? 'positive' : '');
                     html += mkCard('Payoff Ratio', adv.payoff_ratio.toFixed(2) + ':1', adv.payoff_ratio >= 1.5 ? 'positive' : '');
-                    html += mkCard('Calmar Ratio', adv.calmar.toFixed(2), adv.calmar >= 1.5 ? 'positive' : '');
+                    html += mkCard('MAR Ratio', adv.mar_ratio.toFixed(2), adv.mar_ratio >= 1.5 ? 'positive' : '');
 
                     // Risk Adjusted
                     html += mkCard('Sharpe Ratio', adv.sharpe.toFixed(2), adv.sharpe >= 1 ? 'positive' : '');
                     html += mkCard('Sortino Ratio', adv.sortino.toFixed(2), adv.sortino >= 1 ? 'positive' : '');
                     html += mkCard('SQN', adv.sqn.toFixed(2), adv.sqn >= 2 ? 'positive' : '');
-                    html += mkCard('Consistency Ratio', adv.consistency_ratio.toFixed(2), adv.consistency_ratio >= 0.1 ? 'positive' : '');
+                    html += mkCard('Ulcer Index', adv.ulcer_index.toFixed(2), adv.ulcer_index < 10 ? 'positive' : 'negative');
                     html += mkCard('Z-Score', adv.z_score.toFixed(2), Math.abs(adv.z_score) >= 1.96 ? 'positive' : '');
 
                     // Efficiency
+                    html += mkCard('Profit Factor', adv.profit_factor_general === Infinity ? 'Inf' : adv.profit_factor_general.toFixed(2), adv.profit_factor_general >= 1 ? 'positive' : 'negative');
                     html += mkCard('Profit Factor (L)', adv.pf_long === Infinity ? 'Inf' : adv.pf_long.toFixed(2), adv.pf_long >= 1 ? 'positive' : 'negative');
                     html += mkCard('Profit Factor (S)', adv.pf_short === Infinity ? 'Inf' : adv.pf_short.toFixed(2), adv.pf_short >= 1 ? 'positive' : 'negative');
                     html += mkCard('Win Rate (L)', adv.wr_long.toFixed(1) + '%', adv.wr_long >= 50 ? 'positive' : '');
@@ -3944,7 +3991,7 @@ def generate_html_report(
                     // Streaks & Consistency
                     html += mkCard('Std Dev P&L', '$' + adv.std_dev.toLocaleString(undefined, {{maximumFractionDigits: 0}}));
                     html += mkCard('Standard Error', adv.standard_error.toFixed(2));
-                    html += mkCard('T-Score', adv.t_score.toFixed(2), adv.t_score >= 2 ? 'positive' : '');
+                    html += mkCard('Avg Hold Time', fmtDuration(adv.avg_hold_time));
 
                     // Time Analysis
                     html += mkCard('Avg Time Win', adv.avg_time_win.toFixed(1) + ' Days');
