@@ -1434,6 +1434,7 @@ def generate_html_report(
         # Max Drawdown
         peak = -float("inf")
         current_cum = 0
+        min_cum = 0  # Track minimum equity (most negative)
         max_dd = 0
         max_dd_date = "-"
         peak_date = None
@@ -1456,7 +1457,7 @@ def generate_html_report(
         win_durations = [t.duration for t in trade_list if t.gross_pl > 0]
         loss_durations = [t.duration for t in trade_list if t.gross_pl <= 0]
         avg_time_win = sum(win_durations) / len(win_durations) if win_durations else 0
-        sum(loss_durations) / len(loss_durations) if loss_durations else 0
+        avg_time_loss = sum(loss_durations) / len(loss_durations) if loss_durations else 0
 
         # Long vs Short
         longs = [t for t in trade_list if t.direction == "Long"]
@@ -1465,7 +1466,7 @@ def generate_html_report(
         def get_pf(trades):
             w = sum(t.gross_pl for t in trades if t.gross_pl > 0)
             loss = abs(sum(t.gross_pl for t in trades if t.gross_pl <= 0))
-            return w / loss if loss > 0 else (float("inf") if w > 0 else 0)
+            return w if loss == 0 else w / loss
 
         pf_long = get_pf(longs)
         pf_short = get_pf(shorts)
@@ -1478,6 +1479,8 @@ def generate_html_report(
             if current_cum > peak:
                 peak = current_cum
                 peak_date = t.close_date
+            if current_cum < min_cum:
+                min_cum = current_cum
 
             dd = current_cum - peak
             if dd < max_dd:
@@ -1489,10 +1492,12 @@ def generate_html_report(
                     if duration > max_dd_duration:
                         max_dd_duration = duration
 
-            # Ulcer Index: collect squared % drawdown from peak
-            if peak > 0:
-                dd_pct = abs(dd) / peak * 100
-                ulcer_dd_squares.append(dd_pct ** 2)
+            # Ulcer Index: collect squared % drawdown
+            # Denominador base para drawdowns %: usa el mayor entre el equity peak
+            # local y el valor absoluto del mínimo de equidad del período.
+            ui_base = max(peak, abs(current_cum), 1)
+            dd_pct = abs(dd) / ui_base * 100
+            ulcer_dd_squares.append(dd_pct ** 2)
 
             # Streaks
             is_win = t.gross_pl > 0
@@ -1534,14 +1539,36 @@ def generate_html_report(
 
         recovery_factor = total_pl / abs(max_dd) if max_dd != 0 else (float("inf") if total_pl > 0 else 0)
 
-        # MAR Ratio (versión mensual) = Retorno% / MaxDD%
-        # Retorno% = P&L neto / equity peak actual * 100
-        # MaxDD%   = max drawdown / equity peak al momento del drawdown * 100
-        # Al usar distintos peaks, da un resultado diferente al Recovery Factor
-        if peak > 0 and max_dd != 0:
-            retorno_pct = total_pl / peak * 100
-            max_dd_pct = abs(max_dd) / peak_at_max * 100 if peak_at_max > 0 else 0
-            mar_ratio = retorno_pct / max_dd_pct if max_dd_pct > 0 else (float("inf") if retorno_pct > 0 else 0)
+        # Denominador base: usa el mayor entre el equity peak al momento del
+        # drawdown máximo y el valor absoluto del mínimo de equidad del período.
+        dd_denom = max(peak_at_max, abs(min_cum), 1)
+        if max_dd != 0:
+            max_dd_pct = abs(max_dd) / dd_denom * 100
+            if peak > 0:
+                # MAR Ratio = Retorno%Local / MaxDD%Global
+                # Se diferencia del Recovery Factor (NetProfit/MaxDD$) al usar
+                # denominadores DISTINTOS: retorno usa peak local, drawdown usa dd_denom
+                # Retorno% contra equity peak LOCAL del período
+                retorno_base = max(peak, 1)
+                retorno_pct = total_pl / retorno_base * 100
+                # MaxDD% (ya calculado con dd_denom que incluye global_peak)
+                max_dd_dec = max_dd_pct / 100
+                # Calcular retorno para MAR: simple (< 60d) o CAGR anualizado (>= 60d)
+                if len(sorted_trades) >= 2:
+                    period_days = (sorted_trades[-1].close_date - sorted_trades[0].close_date).days + 1
+                else:
+                    period_days = 1
+                if period_days >= 60:
+                    period_years = max(period_days / 365.25, 1 / 365.25)
+                    period_return_dec = total_pl / retorno_base
+                    mar_return = (1 + period_return_dec) ** (1 / period_years) - 1 if period_return_dec > -1 else -1
+                else:
+                    mar_return = (retorno_pct / 100) / 12  # retorno simple del período /12
+                mar_ratio = mar_return / max_dd_dec if max_dd_dec > 0 else (float("inf") if mar_return > 0 else 0)
+            else:
+                # Equity peak negativo: no se puede calcular retorno %, MAR no aplica
+                retorno_pct = 0
+                mar_ratio = 0
         else:
             retorno_pct = 0
             max_dd_pct = 0
@@ -1664,6 +1691,9 @@ def generate_html_report(
 
     # Floating positions JSON
     floating_json = json.dumps(floating_positions) if floating_positions else json.dumps({"total": 0, "positions": []})
+
+    # Ordenar trades cronológicamente para las curvas de equidad
+    closed_trades.sort(key=lambda x: x.close_date)
 
     # --- Daily Data Aggregation ---
     trades_by_day = collections.defaultdict(list)
