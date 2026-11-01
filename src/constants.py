@@ -26,6 +26,7 @@ DIARY_DIR = os.path.expanduser("~/Documents/2026/Diario de Trading")
 
 OUTPUT_FILE = os.path.join(DATA_DIR, "trading_report.html")
 TAGS_FILE = os.path.join(DATA_DIR, "tags.json")
+JOURNAL_FILE = os.path.join(DATA_DIR, "trading_journal.parquet")
 
 SRC_DIR = os.path.join(SCRIPT_DIR, "src")
 ASSETS_DIR = os.path.join(SCRIPT_DIR, "assets")
@@ -130,10 +131,37 @@ ALARIC_TARGET_HEADERS = [
     "Weekday",
 ]
 
+# ── Opciones ───────────────────────────────────────────────────────────────
+
+# Schwab identifica el contrato en el propio símbolo, sin columna aparte:
+# "SPY 10/30/2026 754.00 C" -> tipo SPY, vencimiento 30-oct-2026, strike 754, call.
+OPTION_SYMBOL_PATTERN = r"^[A-Z]+ (\d{2}/\d{2}/\d{4})\s+([\d.]+)\s+[CP]$"
+
+# Formato OCC de IBKR: raíz + YYMMDD + C/P + strike*1000 con 8 dígitos.
+# "VZIO  210820C00030000" -> VZIO, vence 20-ago-2021, call strike 30.
+OCC_SYMBOL_PATTERN = r"^([A-Z.]{1,6})\s*(\d{2})(\d{2})(\d{2})([CP])(\d{8})$"
+
+# Clave interna del journal para opciones: SIMBOLO.TIPO.YYMMDD.STRIKE.
+# Su precio ya viene en dólares por contrato, así que el multiplicador es 1.
+JOURNAL_OPTION_KEY_PATTERN = r"^[A-Z.]{1,8}\.(?:PUT|CALL)\.\d{6}\.[\d.]+$"
+
+# Un contrato de opción cubre 100 acciones: precio de cotización × 100.
+OPTION_MULTIPLIER = 100.0
+
+# ── Posiciones declaradas a mano ───────────────────────────────────────────
+
+# Posiciones arrastradas de antes del primer CSV: sin esto no tienen coste.
+INITIAL_POSITIONS_FILE = os.path.join(CONFIG_DIR, "posiciones_iniciales.json")
+
+# Multiplicador manual por símbolo, para contratos ajustados por split/merger
+# donde 100 no aplica.
+MULTIPLIER_OVERRIDES_FILE = os.path.join(CONFIG_DIR, "multiplicadores.json")
+
 # ── Límites de validación ──────────────────────────────────────────────────
 
 SYMBOL_MAX_LEN = 40
-SYMBOL_ALLOWED_CHARS = ".-_"
+# Se admiten espacio y barra: los símbolos de opción los llevan.
+SYMBOL_ALLOWED_CHARS = ".-_ /"
 
 QTY_MIN = 1
 QTY_MAX = 10_000_000

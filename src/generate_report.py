@@ -1,6 +1,7 @@
 import base64
 import collections
 import contextlib
+import copy
 import csv
 import datetime
 import json
@@ -11,6 +12,7 @@ import re
 from constants import (
     ALARIC_DIR,
     ALARIC_FEE_COLS,
+    CONFIG_DIR,
     DAS_DIR,
     DAS_FEE_COLS,
     DATE_MAX,
@@ -21,7 +23,15 @@ from constants import (
     ENV_PATH,
     GASTOS_DIR,
     GENERIC_DIR,
+    INITIAL_POSITIONS_FILE,
+    JOURNAL_FILE,
+    JOURNAL_OPTION_KEY_PATTERN,
+    MESES_ES,
     METATRADER_DIR,
+    MULTIPLIER_OVERRIDES_FILE,
+    OCC_SYMBOL_PATTERN,
+    OPTION_MULTIPLIER,
+    OPTION_SYMBOL_PATTERN,
     OUTPUT_FILE,
     PRICE_MAX,
     PRICE_MIN,
@@ -188,6 +198,10 @@ def parse_date(date_str: str) -> datetime.datetime | None:
     Returns:
         Datetime o None si no se puede parsear.
     """
+    if not date_str:
+        return None
+    # Schwab anota el retraso en la propia fecha: "10/14/2024 as of 10/11/2024"
+    date_str = date_str.split(" as of ")[0].strip()
     try:
         return datetime.datetime.strptime(date_str, "%m/%d/%Y")
     except ValueError:
@@ -268,6 +282,149 @@ def parse_alaric_closed_candidates(date_str: str) -> list[datetime.datetime]:
     return candidates
 
 
+_OPTION_SYMBOL_RE = re.compile(OPTION_SYMBOL_PATTERN)
+_OCC_SYMBOL_RE = re.compile(OCC_SYMBOL_PATTERN)
+_JOURNAL_OPTION_RE = re.compile(JOURNAL_OPTION_KEY_PATTERN)
+
+# Caché del mapa símbolo -> multiplicador declarado a mano en config.
+_MULTIPLIER_OVERRIDES: dict[str, float] | None = None
+
+
+def _load_multiplier_overrides() -> dict[str, float]:
+    """Carga el mapa símbolo -> multiplicador desde config/multiplicadores.json.
+
+    Returns:
+        Dict con los multiplicadores declarados. Vacío si no hay fichero.
+    """
+    if not os.path.exists(MULTIPLIER_OVERRIDES_FILE):
+        return {}
+
+    try:
+        with open(MULTIPLIER_OVERRIDES_FILE, encoding="utf-8") as f:
+            data = json.load(f)
+    except (OSError, json.JSONDecodeError) as e:
+        print(f"  ⚠️ No se pudo leer {MULTIPLIER_OVERRIDES_FILE}: {e}")
+        return {}
+
+    overrides: dict[str, float] = {}
+    for symbol, value in data.get("simbolos", {}).items():
+        try:
+            overrides[symbol.strip()] = float(value)
+        except (TypeError, ValueError):
+            print(f"  ⚠️ Multiplicador inválido para {symbol!r}: {value!r}")
+
+    return overrides
+
+
+def detect_multiplier(symbol: str) -> float:
+    """Devuelve el multiplicador de contrato de un símbolo.
+
+    Una opción cotiza por contrato de 100 acciones; una acción o ETF es 1 a 1.
+    Schwab no exporta columna de multiplicador, así que se deduce del símbolo.
+    Reconoce el formato Schwab ("SPY 10/30/2026 754 C") y el OCC de IBKR
+    ("VZIO  210820C00030000"). Un símbolo declarado en
+    config/multiplicadores.json tiene prioridad, para contratos ajustados.
+
+    Args:
+        symbol: Símbolo tal cual lo entrega el broker.
+
+    Returns:
+        100.0 si el símbolo tiene formato de opción, 1.0 en otro caso.
+    """
+    global _MULTIPLIER_OVERRIDES
+    if _MULTIPLIER_OVERRIDES is None:
+        _MULTIPLIER_OVERRIDES = _load_multiplier_overrides()
+
+    clean = (symbol or "").strip()
+    if clean in _MULTIPLIER_OVERRIDES:
+        return _MULTIPLIER_OVERRIDES[clean]
+
+    # Clave del journal: el precio ya es por contrato, no se multiplica.
+    if _JOURNAL_OPTION_RE.match(clean):
+        return 1.0
+
+    if _OPTION_SYMBOL_RE.match(clean) or _OCC_SYMBOL_RE.match(clean):
+        return OPTION_MULTIPLIER
+    return 1.0
+
+
+def looks_like_option(symbol: str) -> bool:
+    """Heurística: ¿el símbolo apunta a una opción aunque no casemos su formato?
+
+    Sirve de red de seguridad: un formato nuevo se contabilizaría con
+    multiplicador 1 y el P&L saldría 100 veces corto, sin que nada avise.
+
+    Args:
+        symbol: Símbolo tal cual lo entrega el broker.
+
+    Returns:
+        True si parece una opción no reconocida.
+    """
+    clean = (symbol or "").strip().upper()
+    if not clean or _JOURNAL_OPTION_RE.match(clean):
+        return False
+    if detect_multiplier(clean) != 1.0:
+        return False
+
+    has_contract_marker = (
+        ".PUT." in clean
+        or ".CALL." in clean
+        or re.search(r"\d{6}[CP]\d+", clean) is not None
+        or re.search(r"\b(?:CALL|PUT|[CP])\b", clean) is not None
+    )
+    has_date_or_strike = re.search(r"\d{4,}", clean) is not None or "/" in clean
+
+    return has_contract_marker and has_date_or_strike
+
+
+def warn_unrecognized_options(trades: list["Trade"]) -> list[str]:
+    """Avisa de símbolos con pinta de opción cuyo formato no se reconoce.
+
+    Args:
+        trades: Ejecuciones ya parseadas.
+
+    Returns:
+        Símbolos sospechosos, sin repetir.
+    """
+    suspicious = sorted({t.symbol for t in trades if looks_like_option(t.symbol)})
+    for symbol in suspicious:
+        print(f"  ⚠️ Símbolo con pinta de opción no reconocido: {symbol!r} — revisar multiplicador")
+    return suspicious
+
+
+def parse_occ_expiry(symbol: str) -> datetime.datetime | None:
+    """Extrae el vencimiento de un símbolo en formato OCC (IBKR).
+
+    Args:
+        symbol: Símbolo tal cual lo entrega el broker.
+
+    Returns:
+        La fecha de vencimiento, o None si no es formato OCC.
+    """
+    match = _OCC_SYMBOL_RE.match((symbol or "").strip())
+    if not match:
+        return None
+    # OCC usa dos dígitos de año; el siglo se deduce por convención.
+    year = 2000 + int(match.group(2)) if int(match.group(2)) < 70 else 1900 + int(match.group(2))
+    try:
+        return datetime.datetime(year, int(match.group(3)), int(match.group(4)))
+    except ValueError:
+        return None
+
+
+def parse_option_strike(symbol: str) -> float | None:
+    """Extrae el strike de un símbolo de opción.
+
+    Args:
+        symbol: Símbolo tal cual lo entrega el broker.
+
+    Returns:
+        El strike, o None si el símbolo no es una opción.
+    """
+    match = _OPTION_SYMBOL_RE.match((symbol or "").strip())
+    return float(match.group(2)) if match else None
+
+
 class Trade:
     """Representa una ejecucion individual (no matched)."""
 
@@ -315,6 +472,8 @@ class ClosedTrade:
         entry_tag: str = "",
         exit_tag: str = "",
         note: str = "",
+        multiplier: float | None = None,
+        dividends: float = 0.0,
     ) -> None:
         self.symbol = symbol
         self.open_date = open_date
@@ -329,24 +488,39 @@ class ClosedTrade:
         self.entry_tag = entry_tag
         self.exit_tag = exit_tag
         self.note = note
+        # Las opciones cubren 100 acciones: sin esto el P&L sale 100 veces corto.
+        self.multiplier = detect_multiplier(symbol) if multiplier is None else multiplier
+        self.dividends = dividends
 
-        cost_basis = quantity * entry_price
-        proceeds = quantity * exit_price
+        self.duration = (close_date - open_date).total_seconds() / 86400  # Fracción de días
+        self._recalc()
 
-        total_fees = entry_fees + exit_fees
+    def _recalc(self) -> None:
+        """Recalcula P&L y ROI a partir de precios, comisiones y dividendos."""
+        cost_basis = self.quantity * self.entry_price * self.multiplier
+        proceeds = self.quantity * self.exit_price * self.multiplier
 
-        if direction == "Long":
+        if self.direction == "Long":
             self.gross_pl = proceeds - cost_basis
         else:
             self.gross_pl = cost_basis - proceeds
 
-        self.net_pl = self.gross_pl - total_fees
-        self.duration = (close_date - open_date).total_seconds() / 86400  # Fracción de días
+        # Los dividendos son ingreso real de la posición, no comisión.
+        self.net_pl = self.gross_pl - (self.entry_fees + self.exit_fees) + self.dividends
 
         if cost_basis > 0:
             self.roi_pct = (self.net_pl / cost_basis) * 100
         else:
             self.roi_pct = 0.0
+
+    def apply_dividends(self, amount: float) -> None:
+        """Suma ingresos cobrados durante la vida de la posición.
+
+        Args:
+            amount: Importe neto (dividendo menos retención) en dólares.
+        """
+        self.dividends += amount
+        self._recalc()
 
     @property
     def trade_id(self) -> str:
@@ -422,6 +596,31 @@ class ClosedTrade:
         )
 
 
+# Acciones de ejecución que abren o cierran posición. Las de opciones usan
+# verbos propios ("Buy to Open", "Sell to Close"...) que antes se descartaban.
+EXECUTION_ACTIONS = {
+    "Buy",
+    "Sell",
+    "Buy to Cover",
+    "Sell Short",
+    "Buy to Open",
+    "Buy to Close",
+    "Sell to Open",
+    "Sell to Close",
+}
+
+# Filas de ingreso: no son trades, pero alteran el resultado de la posición.
+INCOME_ACTIONS = {"Qualified Dividend", "Non-Qualified Dividend", "Dividend", "NRA Tax Adj", "Interest"}
+
+# Entrada de títulos sin precio: la compra no está en el CSV y su coste se
+# desconoce. Explican ventas que, si no, parecen posiciones cortas inventadas.
+TRANSFER_ACTION = "Security Transfer"
+
+# Vencimiento o ejercicio de una opción: cierra la posición a precio 0 sin ser
+# ni compra ni venta. Sin esto, la opción se queda abierta para siempre.
+CLOSING_ONLY_ACTIONS = {"Expired", "Assigned"}
+
+
 def process_execution_trades(filepath: str) -> list[Trade]:
     """Parsea ejecuciones Schwab desde CSV y devuelve lista de Trade.
 
@@ -442,7 +641,7 @@ def process_execution_trades(filepath: str) -> list[Trade]:
             for row in data_rows:
                 if row.get("Description", "").startswith("SCHWAB"):
                     continue
-                if row.get("Action") not in ["Buy", "Sell", "Buy to Cover", "Sell Short"]:
+                if row.get("Action") not in EXECUTION_ACTIONS and row.get("Action") not in CLOSING_ONLY_ACTIONS:
                     continue
 
                 date = parse_date(row["Date"])
@@ -457,7 +656,9 @@ def process_execution_trades(filepath: str) -> list[Trade]:
 
                 action = row["Action"].lower()
                 normalized_action = "Buy"
-                if "sell" in action:
+                if row["Action"] in CLOSING_ONLY_ACTIONS:
+                    normalized_action = "Close"
+                elif "sell" in action:
                     normalized_action = "Sell"
                 elif "buy" in action:
                     normalized_action = "Buy"
@@ -1105,26 +1306,35 @@ def process_generic_trades(filepath: str) -> list[Trade] | list[ClosedTrade]:
     return items
 
 
-def match_trades(trades: list[Trade]) -> list[ClosedTrade]:
+def match_trades(trades: list[Trade]) -> tuple[list[ClosedTrade], list[Trade]]:
     """Empareja ejecuciones Buy/Sell usando FIFO para generar ClosedTrade.
+
+    Los lotes que no llegan a cerrarse son posiciones abiertas: se devuelven
+    aparte para la vista Flotante. Nunca se les inventa un cierre.
 
     Args:
         trades: Lista desordenada de ejecuciones Trade.
 
     Returns:
-        Lista de ClosedTrade resultantes del matching FIFO.
+        Tupla (trades cerrados, lotes que quedan abiertos).
     """
-    trades = sorted(trades, key=lambda t: (t.date, t.symbol))
+    # Copia defensiva: merge_item_counts puede devolver el MISMO objeto varias
+    # veces y aquí se muta lot.quantity al emparejar. Sin copia, una ejecución
+    # repetida cerraba dos veces y dejaba un lote fantasma.
+    trades = [copy.copy(t) for t in sorted(trades, key=lambda t: (t.date, t.symbol))]
     position_queues = collections.defaultdict(collections.deque)
     closed_trades = []
 
     for t in trades:
         if not position_queues[t.symbol]:
+            # Vencimiento/ejercicio sin posición abierta: no hay nada que cerrar.
+            if t.action == "Close":
+                continue
             position_queues[t.symbol].append(t)
             continue
 
         open_lot = position_queues[t.symbol][0]
-        is_closing = open_lot.action != t.action
+        is_closing = t.action == "Close" or open_lot.action != t.action
 
         if not is_closing:
             position_queues[t.symbol].append(t)
@@ -1135,6 +1345,11 @@ def match_trades(trades: list[Trade]) -> list[ClosedTrade]:
             while qty_remaining_to_close > 0 and position_queues[t.symbol]:
                 lot = position_queues[t.symbol][0]
                 qty_matched = min(qty_remaining_to_close, lot.quantity)
+
+                # Lote agotado de una pasada anterior: no genera trade.
+                if qty_matched <= 0:
+                    position_queues[t.symbol].popleft()
+                    continue
 
                 if not hasattr(lot, "unit_fee"):
                     lot.unit_fee = lot.fees / lot.quantity if lot.quantity > 0 else 0
@@ -1163,7 +1378,351 @@ def match_trades(trades: list[Trade]) -> list[ClosedTrade]:
                 remainder_trade.unit_fee = current_fees_per_share
                 position_queues[t.symbol].append(remainder_trade)
 
-    return closed_trades
+    open_lots: list[Trade] = []
+    for queue in position_queues.values():
+        open_lots.extend(queue)
+
+    return closed_trades, open_lots
+
+
+def process_transfers(filepath: str) -> list[tuple[str, int]]:
+    """Extrae entradas de títulos por traspaso (sin precio).
+
+    Args:
+        filepath: Ruta al archivo CSV.
+
+    Returns:
+        Lista de (símbolo, cantidad). Solo traspasos de entrada.
+    """
+    rows: list[tuple[str, int]] = []
+    try:
+        with open(filepath, encoding="utf-8-sig") as f:
+            reader = csv.DictReader(f)
+            reader.fieldnames = [name.strip() for name in reader.fieldnames]
+            for row in reader:
+                if row.get("Action") != TRANSFER_ACTION:
+                    continue
+                symbol = (row.get("Symbol") or "").strip()
+                qty = parse_currency(row.get("Quantity"))
+                if symbol and qty > 0:
+                    rows.append((symbol, int(qty)))
+    except Exception as e:
+        print(f"Error reading transfer rows: {e}")
+        return []
+    return rows
+
+
+def drop_transfer_lots(open_lots: list[Trade], transferred: dict[str, int]) -> tuple[list[Trade], list[Trade]]:
+    """Separa los lotes abiertos que un traspaso de entrada explica.
+
+    Una venta sin compra suele venir de títulos traspasados: contarla como
+    posición corta sería inventar una exposición que no existe.
+
+    Args:
+        open_lots: Lotes que el FIFO no cerró.
+        transferred: Cantidad traspasada por símbolo.
+
+    Returns:
+        Tupla (lotes reales, lotes explicados por traspaso).
+    """
+    keep: list[Trade] = []
+    explained: list[Trade] = []
+
+    for lot in open_lots:
+        is_unbacked_sale = lot.action == "Sell" and transferred.get(lot.symbol, 0) >= lot.quantity
+        (explained if is_unbacked_sale else keep).append(lot)
+
+    return keep, explained
+
+
+def parse_option_expiry(symbol: str) -> datetime.datetime | None:
+    """Extrae la fecha de vencimiento de un símbolo de opción listada.
+
+    Solo entiende el formato con vencimiento completo ("SPY 10/30/2026 754 C"),
+    no las claves cortas tipo "AMZN.PUT.250620.100".
+
+    Args:
+        symbol: Símbolo tal cual lo entrega el broker.
+
+    Returns:
+        La fecha de vencimiento, o None si el símbolo no es de este formato.
+    """
+    match = _OPTION_SYMBOL_RE.match((symbol or "").strip())
+    if not match:
+        return None
+    return datetime.datetime.strptime(match.group(1), "%m/%d/%Y")
+
+
+def close_expired_options(
+    open_lots: list[Trade], as_of: datetime.datetime
+) -> tuple[list[Trade], list[ClosedTrade]]:
+    """Cierra a precio 0 las opciones cuyo vencimiento ya pasó.
+
+    Una opción no puede seguir abierta después de vencer. Si el CSV no trae la
+    fila de Expired, se asume que venció sin valor: el largo pierde la prima y
+    el corto se la queda.
+
+    Args:
+        open_lots: Lotes que el FIFO no cerró.
+        as_of: Fecha contra la que se compara el vencimiento.
+
+    Returns:
+        Tupla (lotes que siguen vivos, trades cerrados por vencimiento).
+    """
+    still_open: list[Trade] = []
+    expired: list[ClosedTrade] = []
+
+    for lot in open_lots:
+        expiry = parse_option_expiry(lot.symbol)
+        if expiry is None or expiry >= as_of:
+            still_open.append(lot)
+            continue
+
+        direction = "Long" if lot.action == "Buy" else "Short"
+        entry_fees = getattr(lot, "unit_fee", lot.fees / lot.quantity if lot.quantity else 0) * lot.quantity
+        expired.append(
+            ClosedTrade(lot.symbol, lot.date, expiry, lot.quantity, lot.price, 0.0, entry_fees, 0.0, direction)
+        )
+
+    return still_open, expired
+
+
+def process_income_rows(filepath: str) -> list[tuple[str, datetime.datetime, float]]:
+    """Extrae dividendos y retenciones de un CSV de Schwab.
+
+    Args:
+        filepath: Ruta al archivo CSV.
+
+    Returns:
+        Lista de (símbolo, fecha, importe). Las retenciones van en negativo.
+    """
+    rows: list[tuple[str, datetime.datetime, float]] = []
+    try:
+        with open(filepath, encoding="utf-8-sig") as f:
+            reader = csv.DictReader(f)
+            reader.fieldnames = [name.strip() for name in reader.fieldnames]
+            for row in reader:
+                if row.get("Action") not in INCOME_ACTIONS:
+                    continue
+                date = parse_date(row.get("Date") or "")
+                symbol = (row.get("Symbol") or "").strip()
+                amount = parse_currency(row.get("Amount"))
+                if date is None or not symbol or amount == 0:
+                    continue
+                rows.append((symbol, date, amount))
+    except Exception as e:
+        print(f"Error reading income rows: {e}")
+        return []
+    return rows
+
+
+def apply_dividends(
+    closed_trades: list[ClosedTrade],
+    income_rows: list[tuple[str, datetime.datetime, float]],
+) -> tuple[int, list[tuple[str, datetime.datetime, float]]]:
+    """Atribuye cada ingreso al trade cuya vida contiene su fecha.
+
+    Un dividendo cobrado mientras la posición está abierta es parte del
+    resultado de esa posición, no un trade nuevo.
+
+    Args:
+        closed_trades: Trades ya emparejados (se modifican in place).
+        income_rows: (símbolo, fecha, importe) de dividendos y retenciones.
+
+    Returns:
+        Tupla (ingresos aplicados, ingresos que no encontraron trade).
+    """
+    applied = 0
+    orphans: list[tuple[str, datetime.datetime, float]] = []
+    ordered = sorted(closed_trades, key=lambda t: t.close_date)
+
+    for symbol, date, amount in sorted(income_rows, key=lambda r: r[1]):
+        target = next(
+            (t for t in ordered if t.symbol == symbol and t.open_date <= date <= t.close_date),
+            None,
+        )
+        if target is None:
+            orphans.append((symbol, date, amount))
+            continue
+        target.apply_dividends(amount)
+        applied += 1
+
+    return applied, orphans
+
+
+def process_initial_positions(filepath: str) -> list[Trade]:
+    """Carga posiciones declaradas a mano, anteriores al primer CSV.
+
+    Sirve para posiciones arrastradas: sin la compra, una venta parece una
+    posición corta inventada.
+
+    Args:
+        filepath: Ruta al JSON de posiciones iniciales.
+
+    Returns:
+        Lista de Trade que actúan como apertura de posición.
+    """
+    if not os.path.exists(filepath):
+        return []
+
+    try:
+        with open(filepath, encoding="utf-8") as f:
+            data = json.load(f)
+    except (OSError, json.JSONDecodeError) as e:
+        print(f"  ⚠️ No se pudo leer {filepath}: {e}")
+        return []
+
+    positions: list[Trade] = []
+    for item in data.get("posiciones", []):
+        symbol = str(item.get("symbol", "")).strip()
+        date = None
+        for fmt in ("%Y-%m-%d", "%m/%d/%Y"):
+            try:
+                date = datetime.datetime.strptime(str(item.get("date", "")), fmt)
+                break
+            except ValueError:
+                continue
+        quantity = int(item.get("quantity", 0))
+        price = float(item.get("price", 0.0))
+        action = "Sell" if str(item.get("action", "Buy")).lower() == "sell" else "Buy"
+
+        if (
+            not _validate_symbol(symbol)
+            or not _validate_quantity(quantity)
+            or not _validate_price(price)
+            or not _validate_date(date)
+        ):
+            print(f"  ⚠️ Posición inicial inválida, se ignora: {item}")
+            continue
+
+        positions.append(Trade(date, symbol, quantity, price, action, 0.0))
+
+    return positions
+
+
+def build_floating_positions(open_lots: list[Trade]) -> list[dict]:
+    """Convierte lotes abiertos en filas para la vista Flotante.
+
+    Args:
+        open_lots: Lotes que el FIFO no llegó a cerrar.
+
+    Returns:
+        Lista de dicts con símbolo, dirección, cantidad, precio y valor.
+    """
+    positions: list[dict] = []
+
+    for lot in open_lots:
+        multiplier = detect_multiplier(lot.symbol)
+        is_long = lot.action == "Buy"
+        premium_value = lot.quantity * lot.price * multiplier
+        strike = parse_option_strike(lot.symbol)
+        # En corto, el riesgo no es la prima cobrada sino la obligación.
+        notional = lot.quantity * (strike or lot.price) * multiplier
+
+        positions.append(
+            {
+                "symbol": lot.symbol,
+                "direction": "Long" if is_long else "Short",
+                "date": lot.date.strftime("%Y-%m-%d"),
+                "qty": lot.quantity,
+                "price": round(lot.price, 2),
+                "currency": "USD",
+                "multiplier": int(multiplier),
+                "invested": round(premium_value, 2),
+                "notional": round(notional, 2),
+            }
+        )
+
+    return positions
+
+
+def summarize_floating(positions: list[dict]) -> dict:
+    """Agrupa las posiciones abiertas con los totales de la vista Flotante.
+
+    Args:
+        positions: Lista de posiciones ya construida.
+
+    Returns:
+        Dict con capital invertido en largos, nocional en cortos y el detalle.
+    """
+    longs = [p for p in positions if p["direction"] == "Long"]
+    shorts = [p for p in positions if p["direction"] == "Short"]
+
+    return {
+        "total_invested": round(sum(p["invested"] for p in longs), 2),
+        "total_notional_short": round(sum(p["notional"] for p in shorts), 2),
+        "positions": positions,
+    }
+
+
+def build_period_analysis(trades: list[ClosedTrade]) -> dict:
+    """Agrupa los trades cerrados por año, mes, día del mes y día de la semana.
+
+    Cada grupo se calcula sobre el resultado neto (ya con comisiones) y sobre
+    la fecha de cierre, igual que el resto del informe.
+
+    Args:
+        trades: Trades ya cerrados.
+
+    Returns:
+        Dict con cuatro listas (year, month, day, weekday) de filas con
+        etiqueta, número de trades, P&L neto, win rate, P&L medio y profit factor.
+    """
+    weekday_names = ["Lunes", "Martes", "Miércoles", "Jueves", "Viernes", "Sábado", "Domingo"]
+
+    def empty_bucket() -> dict:
+        return {"count": 0, "net_pl": 0.0, "wins": 0, "gross_win": 0.0, "gross_loss": 0.0}
+
+    groups: dict[str, dict] = {"year": {}, "month": {}, "day": {}, "weekday": {}}
+
+    for t in trades:
+        closed = t.close_date
+        keys = {
+            "year": str(closed.year),
+            "month": str(closed.month),
+            "day": str(closed.day),
+            "weekday": str(closed.weekday()),
+        }
+        for bucket, key in keys.items():
+            entry = groups[bucket].setdefault(key, empty_bucket())
+            entry["count"] += 1
+            entry["net_pl"] += t.net_pl
+            if t.net_pl > 0:
+                entry["wins"] += 1
+                entry["gross_win"] += t.net_pl
+            else:
+                entry["gross_loss"] += abs(t.net_pl)
+
+    def to_rows(bucket: str, ordered_keys: list[str], label_of) -> list[dict]:
+        rows = []
+        for key in ordered_keys:
+            entry = groups[bucket].get(key)
+            if not entry or entry["count"] == 0:
+                continue
+            losses = entry["gross_loss"]
+            rows.append(
+                {
+                    "label": label_of(key),
+                    "count": entry["count"],
+                    "net_pl": round(entry["net_pl"], 2),
+                    "win_rate": round(entry["wins"] / entry["count"] * 100, 1),
+                    "avg_pl": round(entry["net_pl"] / entry["count"], 2),
+                    "profit_factor": None if losses == 0 else round(entry["gross_win"] / losses, 2),
+                }
+            )
+        return rows
+
+    years = sorted(groups["year"].keys(), reverse=True)
+    months = [str(i) for i in range(1, 13)]
+    days = [str(i) for i in range(1, 32)]
+    weekdays = [str(i) for i in range(7)]
+
+    return {
+        "year": to_rows("year", years, lambda k: k),
+        "month": to_rows("month", months, lambda k: MESES_ES[int(k)].capitalize()),
+        "day": to_rows("day", days, lambda k: k),
+        "weekday": to_rows("weekday", weekdays, lambda k: weekday_names[int(k)]),
+    }
 
 
 def _is_date(value: str, fmt: str) -> bool:
@@ -1440,7 +1999,6 @@ def generate_html_report(
         peak_date = None
         max_dd_duration = 0  # Days
         ulcer_dd_squares = []  # For Ulcer Index: squared % drawdowns
-        peak_at_max = 0  # Track peak value for Max DD %
 
         # Streaks
         current_streak_type = 0  # 1 win, -1 loss
@@ -1455,9 +2013,7 @@ def generate_html_report(
 
         # Time Analysis
         win_durations = [t.duration for t in trade_list if t.gross_pl > 0]
-        loss_durations = [t.duration for t in trade_list if t.gross_pl <= 0]
         avg_time_win = sum(win_durations) / len(win_durations) if win_durations else 0
-        avg_time_loss = sum(loss_durations) / len(loss_durations) if loss_durations else 0
 
         # Long vs Short
         longs = [t for t in trade_list if t.direction == "Long"]
@@ -1486,7 +2042,6 @@ def generate_html_report(
             if dd < max_dd:
                 max_dd = dd
                 max_dd_date = t.close_date.strftime("%Y-%m-%d")
-                peak_at_max = peak  # Capture peak at time of max DD
                 if peak_date:
                     duration = (t.close_date - peak_date).days
                     if duration > max_dd_duration:
@@ -1689,7 +2244,11 @@ def generate_html_report(
     daily_tags_json = json.dumps(all_tags_data)
 
     # Floating positions JSON
-    floating_json = json.dumps(floating_positions) if floating_positions else json.dumps({"total": 0, "positions": []})
+    floating_json = (
+        json.dumps(floating_positions)
+        if floating_positions
+        else json.dumps({"total_invested": 0, "total_notional_short": 0, "positions": []})
+    )
 
     # Ordenar trades cronológicamente para las curvas de equidad
     closed_trades.sort(key=lambda x: x.close_date)
@@ -1764,6 +2323,7 @@ def generate_html_report(
     monthly_equity_json = json.dumps(monthly_equity_curves)
     daily_equity_json = json.dumps(daily_equity_curves)
     daily_data_json = json.dumps(daily_stats)
+    period_analysis_json = json.dumps(build_period_analysis(closed_trades))
 
     # --- Screenshots (Capturas de trades) ---
     screenshots_data = {}
@@ -1958,10 +2518,6 @@ def generate_html_report(
 
     monthly_stats_json = json.dumps(monthly_context_stats)
     monthly_gain_loss_json = json.dumps(monthly_gain_loss_stats)
-
-    print(f"DEBUG: Annual Stats Keys: {annual_stats.keys()}")
-    if "All" in annual_stats:
-        print(f"DEBUG: All Net PL: {annual_stats['All']['net_pl']}")
 
     # Embed logo as base64
     logo_b64 = ""
@@ -2314,6 +2870,7 @@ def generate_html_report(
         <button class="nav-btn" onclick="switchView('monthly')" id="btn-monthly">Calendar</button>
         <button class="nav-btn" onclick="switchView('daily')" id="btn-daily">Daily details</button>
         <button class="nav-btn" onclick="switchView('ratios')" id="btn-ratios">Metricas</button>
+        <button class="nav-btn" onclick="switchView('analysis')" id="btn-analysis">&#x1F4C8; Análisis</button>
         <button class="nav-btn" onclick="switchView('floating')" id="btn-floating">&#x1F4CB; Flotante</button>
         <button class="nav-btn" onclick="switchView('buildReport')" id="btn-buildReport">&#x1F4CA; Build Report</button>
     </aside>
@@ -2482,7 +3039,7 @@ def generate_html_report(
             <div class="card">
                  <div class="card-title">Monthly Ticker Performance <span id="tickerMonthLabel"></span></div>
                  <div style="overflow-x: auto; max-height: 400px; overflow-y: auto;">
-                    <table id="monthlyTickersTable"><thead><tr><th>Symbol</th><th>Trades</th><th>Net P&L</th></tr></thead><tbody></tbody></table>
+                    <table id="monthlyTickersTable"><thead><tr><th style="text-align:left;">Symbol</th><th style="text-align:center;">Trades</th><th style="text-align:right;">Net P&L</th></tr></thead><tbody></tbody></table>
                  </div>
             </div>
         </section>
@@ -2519,12 +3076,12 @@ def generate_html_report(
 
             <div class="card" style="margin-bottom: 2rem;">
                  <div class="card-title">Day Equity & Execution</div>
-                 <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 2rem; align-items: start;">
+                 <div style="display: grid; grid-template-columns: 1fr 1.6fr; gap: 2rem; align-items: start;">
                      <div class="chart-container" style="height: 300px;">
                         <canvas id="dailyEquityChart"></canvas>
                      </div>
                      <div style="overflow-x: auto; max-height: 400px; overflow-y: auto;">
-                        <table id="dailyTradesTable"><thead><tr><th>Symbol</th><th>Dir</th><th>Qty</th><th>Entry</th><th>Exit</th><th>P&L</th><th>Entry Tag</th><th>Exit Tag</th></tr></thead><tbody></tbody></table>
+                        <table id="dailyTradesTable"><thead><tr><th style="text-align:left;">Symbol</th><th style="text-align:center;">Dir</th><th style="text-align:right;">Qty</th><th style="text-align:right;">Entry</th><th style="text-align:right;">Exit</th><th style="text-align:right;">P&L</th><th style="text-align:left;">Entry Tag</th><th style="text-align:left;">Exit Tag</th></tr></thead><tbody></tbody></table>
                      </div>
                  </div>
             </div>
@@ -2556,28 +3113,95 @@ def generate_html_report(
             <div class="grid" id="ratiosGrid" style="grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));"></div>
         </section>
 
+        <!-- ANALYSIS VIEW -->
+        <section id="analysisView" class="view-section">
+            <div class="calendar-header"><h1>Análisis por Periodo</h1></div>
+            <p style="color:var(--text-secondary); margin-bottom:1.5rem;">
+                Resultado de los trades cerrados agrupado por año, mes, día del mes y día de la semana. Todo por fecha de cierre y neto de comisiones.
+            </p>
+            <div class="card">
+                <div class="card-title">Por Año</div>
+                <div style="display:grid; grid-template-columns: 2fr 1fr; gap: 1.5rem; align-items: start;">
+                    <div style="overflow-x: auto;"><table><thead><tr><th style="text-align:left;">Periodo</th><th style="text-align:right;">Trades</th><th style="text-align:right;">P&L Neto</th><th style="text-align:right;">Win Rate</th><th style="text-align:right;">P&L Medio</th><th style="text-align:right;">Profit Factor</th></tr></thead><tbody id="analysisYearBody"></tbody></table></div>
+                    <div style="display:flex; flex-direction:column; gap:0.75rem;">
+                        <div class="chart-container" style="height: 280px;"><canvas id="analysisYearChart"></canvas></div>
+                        <div id="analysisYearAvg"></div>
+                        <div id="analysisYearBest"></div>
+                    </div>
+                </div>
+            </div>
+            <div class="card">
+                <div class="card-title">Por Mes</div>
+                <div style="display:grid; grid-template-columns: 2fr 1fr; gap: 1.5rem; align-items: start;">
+                    <div style="overflow-x: auto;"><table><thead><tr><th style="text-align:left;">Periodo</th><th style="text-align:right;">Trades</th><th style="text-align:right;">P&L Neto</th><th style="text-align:right;">Win Rate</th><th style="text-align:right;">P&L Medio</th><th style="text-align:right;">Profit Factor</th></tr></thead><tbody id="analysisMonthBody"></tbody></table></div>
+                    <div style="display:flex; flex-direction:column; gap:0.75rem;">
+                        <div class="chart-container" style="height: 280px;"><canvas id="analysisMonthChart"></canvas></div>
+                        <div id="analysisMonthAvg"></div>
+                        <div id="analysisMonthBest"></div>
+                    </div>
+                </div>
+            </div>
+            <div class="card">
+                <div class="card-title">Por Día del Mes</div>
+                <div style="display:grid; grid-template-columns: 2fr 1fr; gap: 1.5rem; align-items: start;">
+                    <div style="overflow-x: auto;"><table><thead><tr><th style="text-align:left;">Periodo</th><th style="text-align:right;">Trades</th><th style="text-align:right;">P&L Neto</th><th style="text-align:right;">Win Rate</th><th style="text-align:right;">P&L Medio</th><th style="text-align:right;">Profit Factor</th></tr></thead><tbody id="analysisDayBody"></tbody></table></div>
+                    <div style="display:flex; flex-direction:column; gap:0.75rem;">
+                        <div class="chart-container" style="height: 280px;"><canvas id="analysisDayChart"></canvas></div>
+                        <div id="analysisDayAvg"></div>
+                        <div id="analysisDayBest"></div>
+                    </div>
+                </div>
+            </div>
+            <div class="card">
+                <div class="card-title">Por Día de la Semana</div>
+                <div style="display:grid; grid-template-columns: 2fr 1fr; gap: 1.5rem; align-items: start;">
+                    <div style="overflow-x: auto;"><table><thead><tr><th style="text-align:left;">Periodo</th><th style="text-align:right;">Trades</th><th style="text-align:right;">P&L Neto</th><th style="text-align:right;">Win Rate</th><th style="text-align:right;">P&L Medio</th><th style="text-align:right;">Profit Factor</th></tr></thead><tbody id="analysisWeekdayBody"></tbody></table></div>
+                    <div style="display:flex; flex-direction:column; gap:0.75rem;">
+                        <div class="chart-container" style="height: 280px;"><canvas id="analysisWeekdayChart"></canvas></div>
+                        <div id="analysisWeekdayAvg"></div>
+                        <div id="analysisWeekdayBest"></div>
+                    </div>
+                </div>
+            </div>
+        </section>
+
         <!-- FLOATING VIEW -->
         <section id="floatingView" class="view-section">
-            <div class="calendar-header"><h1>Largo Plazo</h1></div>
+            <div class="calendar-header"><h1>Posiciones Abiertas</h1></div>
             <p style="color:var(--text-secondary); margin-bottom:1.5rem;">
-                Compras abiertas a largo plazo en IBKR (ETFs). No afectan los resultados de trading.
+                Posiciones vivas: no cuentan como venta hasta que se cierran. El día que cierran, cuentan íntegras en ese día.
             </p>
             <div class="grid">
                 <div class="card">
-                    <div class="card-title">Total Invertido</div>
+                    <div class="card-title">Capital Invertido (Largos)</div>
                     <div class="card-value" id="floating_total">-</div>
                 </div>
                 <div class="card">
-                    <div class="card-title">Compras</div>
+                    <div class="card-title">Nocional en Corto</div>
+                    <div class="card-value" id="floating_short">-</div>
+                </div>
+                <div class="card">
+                    <div class="card-title">Posiciones</div>
                     <div class="card-value" id="floating_count">-</div>
                 </div>
             </div>
             <div class="card">
-                <div class="card-title">Detalle por Compra</div>
+                <div class="card-title">Ticket</div>
+                <div style="overflow-x: auto; max-height: 400px; overflow-y: auto;">
+                    <table id="floatingAveragesTable">
+                        <thead>
+                            <tr><th style="text-align:left;">Ticker</th><th style="text-align:center;">Dir</th><th style="text-align:right;">Compras</th><th style="text-align:right;">Cantidad</th><th style="text-align:right;">Precio Medio</th><th style="text-align:right;">Invertido</th></tr>
+                        </thead>
+                        <tbody></tbody>
+                    </table>
+                </div>
+            </div>
+            <div class="card">
+                <div class="card-title">Compras</div>
                 <div style="overflow-x: auto;">
                     <table>
                         <thead>
-                            <tr><th>Símbolo</th><th>Fecha Compra</th><th>Cantidad</th><th>Precio</th><th>Invertido</th></tr>
+                            <tr><th style="text-align:left;">Símbolo</th><th style="text-align:center;">Dir</th><th style="text-align:center;">Apertura</th><th style="text-align:right;">Cantidad</th><th style="text-align:right;">Precio</th><th style="text-align:right;">Invertido</th><th style="text-align:right;">Nocional</th></tr>
                         </thead>
                         <tbody id="floatingTableBody"></tbody>
                     </table>
@@ -2587,7 +3211,10 @@ def generate_html_report(
                 <div class="card-title" style="color:var(--text-secondary);">Nota</div>
                 <p style="color:var(--text-secondary); font-size:0.85rem;">
                     Estas posiciones no están incluidas en las métricas de trading (P&L, Profit Factor, etc.)
-                    porque son inversiones a largo plazo, no trades activos.
+                    porque todavía no se han cerrado. En corto, el nocional es la obligación
+                    (strike × 100 × contratos en opciones), no la prima cobrada.
+                    El precio va en la divisa del broker (IBKR cotiza en libras £, Schwab en dólares $);
+                    el invertido va siempre en dólares.
                 </p>
             </div>
         </section>
@@ -2788,6 +3415,7 @@ def generate_html_report(
             const dailyData = {daily_data_json};
             const monthlyData = {monthly_data_json};
             const monthlySymbols = {monthly_symbols_json};
+            const periodAnalysis = {period_analysis_json};
             const monthlyStats = {monthly_stats_json};
             const monthlyGainLoss = {monthly_gain_loss_json};
             const monthlyEquityData = {monthly_equity_json};
@@ -3253,6 +3881,7 @@ def generate_html_report(
             let monthlyChartInstance = null;
             let monthlyBarChartInstance = null;
             let dailyChartInstance = null;
+            let analysisCharts = {{}};
             let annualEquityChart = null;
             let annualMonthlyChart = null;
             let longShortChartInstance = null;
@@ -3267,6 +3896,7 @@ def generate_html_report(
                 if (viewName === 'monthly') renderCalendar();
                 if (viewName === 'daily') renderDaily();
                 if (viewName === 'ratios') renderRatios();
+                if (viewName === 'analysis') renderAnalysis();
                 if (viewName === 'floating') renderFloating();
                 if (viewName === 'buildReport') renderBuildReport();
             }}
@@ -3564,7 +4194,7 @@ def generate_html_report(
                 }} else {{
                     ssContainer.innerHTML = ssData.map(s => `
                         <div style="cursor:pointer; border:1px solid var(--border-color); border-radius:8px; overflow:hidden; background:var(--card-bg); transition:border-color 0.2s;" onmouseover="this.style.borderColor='var(--accent-primary)'" onmouseout="this.style.borderColor='var(--border-color)'" onclick="window.open('Reports_Screenshots/${{encodeURIComponent(s.file)}}', '_blank', 'width=1400,height=900,menubar=no,toolbar=no,location=no,status=no')">
-	                            <img src="Reports_Screenshots/${{encodeURIComponent(s.file)}}" loading="lazy" style="width:100%; height:120px; object-fit:cover; display:block;">
+                                <img src="Reports_Screenshots/${{encodeURIComponent(s.file)}}" loading="lazy" style="width:100%; height:120px; object-fit:cover; display:block;">
                             <div style="padding:4px 8px; font-size:0.75rem; color:var(--accent-primary); font-family:'Orbitron',sans-serif;">${{s.symbol || '??'}}</div>
                         </div>
                     `).join('');
@@ -3627,7 +4257,7 @@ def generate_html_report(
                         if (!tagStr) return '';
                         return tagStr.split(',').map(t => t.trim()).filter(Boolean).map(t => `<span style="${{tagStyle}}">${{t}}</span>`).join('');
                     }};
-                    row.innerHTML = `<td style="font-weight:bold; color:#60a5fa; cursor:pointer;" onclick="openTagModal('${{tid.replace(/'/g, "\\'")}}', '${{t.symbol}}', '${{t.type}}', ${{t.quantity}}, ${{t.entry}}, ${{t.exit}}, ${{t.pl}})">${{t.symbol}}</td><td>${{t.type}}</td><td>${{t.quantity}}</td><td>$${{t.entry.toFixed(2)}}</td><td>$${{t.exit.toFixed(2)}}</td><td class="${{t.pl >= 0?'positive':'negative'}}">$${{t.pl.toFixed(2)}}</td><td>${{tagCell(entryTag)}}</td><td>${{tagCell(exitTag)}}</td>`;
+                    row.innerHTML = `<td style="font-weight:bold; color:#60a5fa; cursor:pointer; white-space:nowrap; text-align:left;" onclick="openTagModal('${{tid.replace(/'/g, "\\'")}}', '${{t.symbol}}', '${{t.type}}', ${{t.quantity}}, ${{t.entry}}, ${{t.exit}}, ${{t.pl}})">${{t.symbol}}</td><td style="text-align:center;">${{t.type}}</td><td style="text-align:right;">${{t.quantity}}</td><td style="text-align:right;">$${{t.entry.toFixed(2)}}</td><td style="text-align:right;">$${{t.exit.toFixed(2)}}</td><td class="${{t.pl >= 0?'positive':'negative'}}" style="text-align:right;">${{t.pl < 0 ? '-$' : '$'}}${{Math.abs(t.pl).toFixed(2)}}</td><td style="text-align:left;">${{tagCell(entryTag)}}</td><td style="text-align:left;">${{tagCell(exitTag)}}</td>`;
                     tbody.appendChild(row);
                 }});
                 if (typeof Chart !== 'undefined') renderDailyEquityChart(selectedDayKey);
@@ -3642,7 +4272,7 @@ def generate_html_report(
                 document.getElementById('modalEntry').innerText = '$' + entry.toFixed(4);
                 document.getElementById('modalExit').innerText = '$' + exit.toFixed(4);
                 const plEl = document.getElementById('modalPnL');
-                plEl.innerText = '$' + pl.toFixed(2);
+                plEl.innerText = (pl < 0 ? '-$' : '$') + Math.abs(pl).toFixed(2);
                 plEl.className = pl >= 0 ? 'positive' : 'negative';
 
                 // Load existing tags
@@ -3911,7 +4541,7 @@ def generate_html_report(
                 document.getElementById('tickerMonthLabel').innerText = `(${{monthKey}})`;
                 const symbols = monthlySymbols[monthKey] || [];
                 if (symbols.length === 0) {{ tbody.innerHTML = '<tr><td colspan="3">No Data</td></tr>'; return; }}
-                symbols.forEach(s => {{ const row = document.createElement('tr'); const plClass = s.pnl >= 0 ? 'positive' : 'negative'; row.innerHTML = `<td style="font-weight:bold; color:#60a5fa;">${{s.symbol}}</td><td>${{s.count}}</td><td class="${{plClass}}">$${{Math.abs(s.pnl).toLocaleString(undefined, {{minimumFractionDigits: 2, maximumFractionDigits: 2}})}}</td>`; tbody.appendChild(row); }});
+                symbols.forEach(s => {{ const row = document.createElement('tr'); const plClass = s.pnl >= 0 ? 'positive' : 'negative'; row.innerHTML = `<td style="text-align:left; font-weight:bold; color:#60a5fa;">${{s.symbol}}</td><td style="text-align:center;">${{s.count}}</td><td class="${{plClass}}" style="text-align:right;">$${{Math.abs(s.pnl).toLocaleString(undefined, {{minimumFractionDigits: 2, maximumFractionDigits: 2}})}}</td>`; tbody.appendChild(row); }});
             }}
 
             function renderRatios() {{
@@ -4445,19 +5075,159 @@ def generate_html_report(
                 ct.innerHTML = h;
             }}
 
+            function renderAnalysis() {{
+                const money = v => (v < 0 ? '-$' : '$') + Math.abs(v).toLocaleString(undefined, {{minimumFractionDigits: 2, maximumFractionDigits: 2}});
+                const paint = (tbodyId, rows) => {{
+                    const tb = document.getElementById(tbodyId);
+                    if (!tb) return;
+                    if (!rows || rows.length === 0) {{
+                        tb.innerHTML = '<tr><td colspan="6" style="text-align:center; color:var(--text-secondary);">No Data</td></tr>';
+                        return;
+                    }}
+                    tb.innerHTML = rows.map(r => {{
+                        const cls = r.net_pl >= 0 ? 'positive' : 'negative';
+                        const pf = (r.profit_factor === null || r.profit_factor === undefined) ? '-' : r.profit_factor.toFixed(2);
+                        return '<tr>' +
+                            '<td style="text-align:left;">' + r.label + '</td>' +
+                            '<td style="text-align:right;">' + r.count + '</td>' +
+                            '<td class="' + cls + '" style="text-align:right;">' + money(r.net_pl) + '</td>' +
+                            '<td style="text-align:right;">' + r.win_rate.toFixed(1) + '%</td>' +
+                            '<td style="text-align:right;">' + money(r.avg_pl) + '</td>' +
+                            '<td style="text-align:right;">' + pf + '</td>' +
+                        '</tr>';
+                    }}).join('');
+                }};
+                paint('analysisYearBody', periodAnalysis.year);
+                paint('analysisMonthBody', periodAnalysis.month);
+                paint('analysisDayBody', periodAnalysis.day);
+                paint('analysisWeekdayBody', periodAnalysis.weekday);
+
+                const line = (label, value, color) => '<div style="display:flex; justify-content:space-between; gap:0.5rem; padding:0.35rem 0; border-bottom:1px solid rgba(0,212,255,0.1); font-size:0.85rem;">' +
+                    '<span style="color:var(--text-secondary);">' + label + '</span>' +
+                    '<span style="font-family:\\'Space Mono\\', monospace;' + (color ? ' color:' + color + ';' : '') + '">' + value + '</span></div>';
+                const median = arr => {{
+                    if (!arr.length) return null;
+                    const v = arr.slice().sort((a, b) => a - b);
+                    const mid = Math.floor(v.length / 2);
+                    return v.length % 2 ? v[mid] : (v[mid - 1] + v[mid]) / 2;
+                }};
+                const avgBlock = (id, rows) => {{
+                    const el = document.getElementById(id);
+                    if (!el) return;
+                    if (!rows || rows.length === 0) {{ el.innerHTML = ''; return; }}
+                    const wr = median(rows.map(r => r.win_rate));
+                    const pl = median(rows.map(r => r.net_pl));
+                    const pfs = rows.map(r => r.profit_factor).filter(v => v !== null && v !== undefined);
+                    const pf = median(pfs);
+                    el.innerHTML = '<div class="card-title" style="font-size:0.7rem; margin-bottom:0.3rem;">Mediana</div>' +
+                        line('Win Rate', wr === null ? '-' : wr.toFixed(1) + '%') +
+                        line('P&L Mediano', pl === null ? '-' : money(pl)) +
+                        line('Profit Factor', pf === null ? '-' : pf.toFixed(2));
+                }};
+                avgBlock('analysisYearAvg', periodAnalysis.year);
+                avgBlock('analysisMonthAvg', periodAnalysis.month);
+                avgBlock('analysisDayAvg', periodAnalysis.day);
+                avgBlock('analysisWeekdayAvg', periodAnalysis.weekday);
+
+                // Mejor y peor periodo de cada agrupación, por P&L neto.
+                const extremaBlock = (id, rows) => {{
+                    const el = document.getElementById(id);
+                    if (!el) return;
+                    if (!rows || rows.length === 0) {{ el.innerHTML = ''; return; }}
+                    let best = rows[0], worst = rows[0];
+                    rows.forEach(r => {{
+                        if (r.net_pl > best.net_pl) best = r;
+                        if (r.net_pl < worst.net_pl) worst = r;
+                    }});
+                    el.innerHTML = '<div class="card-title" style="font-size:0.7rem; margin-bottom:0.3rem;">Extremos</div>' +
+                        line('Mejor &middot; ' + best.label, money(best.net_pl), '#10b981') +
+                        line('Peor &middot; ' + worst.label, money(worst.net_pl), '#ef4444');
+                }};
+                extremaBlock('analysisYearBest', periodAnalysis.year);
+                extremaBlock('analysisMonthBest', periodAnalysis.month);
+                extremaBlock('analysisDayBest', periodAnalysis.day);
+                extremaBlock('analysisWeekdayBest', periodAnalysis.weekday);
+
+                if (typeof Chart === 'undefined') return;
+                const chart = (key, canvasId, rows) => {{
+                    const el = document.getElementById(canvasId);
+                    if (!el) return;
+                    if (analysisCharts[key]) analysisCharts[key].destroy();
+                    const maxTicks = rows.length > 15 ? 10 : 12;
+                    analysisCharts[key] = new Chart(el.getContext('2d'), {{
+                        type: 'bar',
+                        data: {{
+                            labels: rows.map(r => r.label),
+                            datasets: [{{ label: 'P&L Neto', data: rows.map(r => r.net_pl), backgroundColor: rows.map(r => r.net_pl >= 0 ? '#10b981' : '#ef4444'), borderRadius: 2 }}]
+                        }},
+                        options: {{
+                            responsive: true,
+                            maintainAspectRatio: false,
+                            plugins: {{
+                                legend: {{ display: false }},
+                                tooltip: {{ callbacks: {{ label: c => (c.raw < 0 ? '-$' : '$') + Math.abs(c.raw).toLocaleString(undefined, {{minimumFractionDigits: 2, maximumFractionDigits: 2}}) }} }}
+                            }},
+                            scales: {{
+                                y: {{ grid: {{ color: '#334155' }}, ticks: {{ color: '#94a3b8', font: {{ size: 9 }} }} }},
+                                x: {{ grid: {{ display: false }}, ticks: {{ color: '#94a3b8', maxRotation: 45, autoSkip: true, maxTicksLimit: maxTicks, font: {{ size: 9 }} }} }}
+                            }}
+                        }}
+                    }});
+                }};
+                chart('year', 'analysisYearChart', periodAnalysis.year);
+                chart('month', 'analysisMonthChart', periodAnalysis.month);
+                chart('day', 'analysisDayChart', periodAnalysis.day);
+                chart('weekday', 'analysisWeekdayChart', periodAnalysis.weekday);
+            }}
+
             function renderFloating() {{
-                document.getElementById('floating_total').innerText = '$' + floatingPos.total.toLocaleString(undefined, {{minimumFractionDigits:2, maximumFractionDigits:2}});
-                document.getElementById('floating_count').innerText = 'COMPRAS ' + floatingPos.positions.length;
+                const money = v => '$' + (v || 0).toLocaleString(undefined, {{minimumFractionDigits:2, maximumFractionDigits:2}});
+                const fx = {{ GBP: '£', USD: '$' }};
+                const curOf = p => fx[p.currency] || '$';
+                document.getElementById('floating_total').innerText = money(floatingPos.total_invested);
+                document.getElementById('floating_short').innerText = money(floatingPos.total_notional_short);
+                document.getElementById('floating_count').innerText = new Set(floatingPos.positions.map(p => p.symbol)).size;
                 const tbody = document.getElementById('floatingTableBody');
                 tbody.innerHTML = '';
                 floatingPos.positions.forEach(p => {{
+                    const isLong = p.direction === 'Long';
+                    const dirColor = isLong ? 'var(--accent-green)' : 'var(--accent-red)';
                     const tr = document.createElement('tr');
-                    tr.innerHTML = '<td><strong style="color:var(--accent-primary);">' + p.symbol + '</strong></td>' +
-                        '<td style="color:var(--text-secondary);font-size:0.85rem;">' + (p.date || '-') + '</td>' +
-                        '<td>' + p.qty + '</td>' +
-                        '<td>$' + p.price.toFixed(2) + '</td>' +
-                        '<td style="color:var(--accent-blue);">$' + p.invested.toFixed(2) + '</td>';
+                    tr.innerHTML = '<td style="text-align:left; white-space:nowrap;"><strong style="color:var(--accent-primary);">' + p.symbol + '</strong></td>' +
+                        '<td style="text-align:center; color:' + dirColor + ';font-size:0.85rem;">' + p.direction + '</td>' +
+                        '<td style="text-align:center; color:var(--text-secondary);font-size:0.85rem;">' + (p.date || '-') + '</td>' +
+                        '<td style="text-align:right;">' + p.qty + '</td>' +
+                        '<td style="text-align:right;">' + curOf(p) + p.price.toFixed(2) + '</td>' +
+                        '<td style="text-align:right; color:var(--accent-blue);">' + (isLong ? money(p.invested) : '-') + '</td>' +
+                        '<td style="text-align:right; color:' + dirColor + ';">' + (isLong ? '-' : money(p.notional)) + '</td>';
                     tbody.appendChild(tr);
+                }});
+
+                // Medias por ticker: (cantidad × precio) ponderado y compra media.
+                const agg = {{}};
+                floatingPos.positions.forEach(p => {{
+                    const key = p.symbol + '|' + p.direction;
+                    if (!agg[key]) agg[key] = {{ symbol: p.symbol, direction: p.direction, currency: p.currency || 'USD', lots: 0, qty: 0, cost: 0, invested: 0 }};
+                    const a = agg[key];
+                    a.lots += 1;
+                    a.qty += p.qty;
+                    a.cost += p.qty * p.price;
+                    a.invested += p.invested;
+                }});
+                const abody = document.querySelector('#floatingAveragesTable tbody');
+                abody.innerHTML = '';
+                Object.values(agg).sort((x, y) => y.invested - x.invested).forEach(a => {{
+                    const isLong = a.direction === 'Long';
+                    const dirColor = isLong ? 'var(--accent-green)' : 'var(--accent-red)';
+                    const avgPrice = a.qty ? a.cost / a.qty : 0;
+                    const tr = document.createElement('tr');
+                    tr.innerHTML = '<td style="text-align:left; white-space:nowrap;"><strong style="color:var(--accent-primary);">' + a.symbol + '</strong></td>' +
+                        '<td style="text-align:center; color:' + dirColor + '; font-size:0.85rem;">' + a.direction + '</td>' +
+                        '<td style="text-align:right;">' + a.lots + '</td>' +
+                        '<td style="text-align:right;">' + a.qty + '</td>' +
+                        '<td style="text-align:right;">' + (fx[a.currency] || '$') + avgPrice.toFixed(2) + '</td>' +
+                        '<td style="text-align:right; color:var(--accent-blue);">' + money(a.invested) + '</td>';
+                    abody.appendChild(tr);
                 }});
             }}
 
@@ -4603,11 +5373,10 @@ def process_journal(filepath: str) -> list[Trade]:
     Returns:
         Lista de Trade objects. Vacia si faltan dependencias o hay error.
     """
-    script_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-    DEGIRO_CUSIP_MAP_PATH = os.path.join(script_dir, "config", "degiro_cusip_map.json")
+    cusip_map_path = os.path.join(CONFIG_DIR, "degiro_cusip_map.json")
     cusip_map = {}
-    if os.path.exists(DEGIRO_CUSIP_MAP_PATH):
-        with open(DEGIRO_CUSIP_MAP_PATH) as f:
+    if os.path.exists(cusip_map_path):
+        with open(cusip_map_path) as f:
             cusip_map = json.load(f)
 
     try:
@@ -4752,21 +5521,30 @@ def main() -> None:
     # 1. Process Schwab executions
     print("Processing Schwab executions...")
     all_executions = merge_item_counts(SCHWAB_DIR, process_execution_trades)
+
+    # Posiciones arrastradas de antes del primer CSV (declaradas a mano)
+    initial_positions = process_initial_positions(INITIAL_POSITIONS_FILE)
+    if initial_positions:
+        print(f"Initial declared positions: {len(initial_positions)}")
+        all_executions += initial_positions
+
     print(f"Total deduplicated executions: {len(all_executions)}")
+    warn_unrecognized_options(all_executions)
 
     print("Matching execution trades...")
-    closed_execution_trades = match_trades(all_executions)
+    closed_execution_trades, open_execution_lots = match_trades(all_executions)
     print(f"Generated {len(closed_execution_trades)} closed trades from executions.")
+    print(f"Open lots pending: {len(open_execution_lots)}")
 
     # 2. Process Historical Journal (trading_journal.parquet) — Degiro + Tasty STOCK
-    JOURNAL_PATH = os.path.join(BASE_DIR, "data", "trading_journal.parquet")
     print("Processing Historical Journal (trading_journal.parquet)...")
     journal_trades = []
-    if os.path.exists(JOURNAL_PATH):
-        journal_trades = process_journal(JOURNAL_PATH)
+    if os.path.exists(JOURNAL_FILE):
+        journal_trades = process_journal(JOURNAL_FILE)
     else:
-        print(f"  ⚠️ {JOURNAL_PATH} no encontrado, saltando.")
-    closed_journal_trades = match_trades(journal_trades)
+        print(f"  ⚠️ {JOURNAL_FILE} no encontrado, saltando.")
+    closed_journal_trades, open_journal_lots = match_trades(journal_trades)
+    warn_unrecognized_options(journal_trades)
     print(f"Generated {len(closed_journal_trades)} closed trades from historical journal.")
 
     # 3. Process Alaric reports (from PropReports)
@@ -4783,14 +5561,14 @@ def main() -> None:
     print("Processing DAS executions...")
     all_das_executions = merge_item_counts(DAS_DIR, process_das_trades)
     print(f"Total deduplicated DAS executions: {len(all_das_executions)}")
-    closed_das_trades = match_trades(all_das_executions)
+    closed_das_trades, open_das_lots = match_trades(all_das_executions)
     print(f"Generated {len(closed_das_trades)} closed trades from DAS.")
 
     # 5. Process ThinkOrSwim executions
     print("Processing ThinkOrSwim executions...")
     all_tos_executions = merge_item_counts(TOS_DIR, process_tos_trades)
     print(f"Total deduplicated TOS executions: {len(all_tos_executions)}")
-    closed_tos_trades = match_trades(all_tos_executions)
+    closed_tos_trades, open_tos_lots = match_trades(all_tos_executions)
     print(f"Generated {len(closed_tos_trades)} closed trades from TOS.")
 
     # 6. Process Generic CSV imports
@@ -4799,7 +5577,8 @@ def main() -> None:
     # Generic can return Trade or ClosedTrade — separate them
     generic_executions = [x for x in all_generic_items if isinstance(x, Trade)]
     generic_closed = [x for x in all_generic_items if isinstance(x, ClosedTrade)]
-    closed_generic_trades = match_trades(generic_executions) + generic_closed
+    closed_generic_from_exec, open_generic_lots = match_trades(generic_executions)
+    closed_generic_trades = closed_generic_from_exec + generic_closed
     print(f"Total deduplicated Generic items: {len(all_generic_items)} -> {len(closed_generic_trades)} closed trades.")
 
     # Combine all trades
@@ -4813,6 +5592,31 @@ def main() -> None:
         + closed_journal_trades
     )
     print(f"Total overall closed trades: {len(all_closed_trades)}")
+
+    # Dividendos y retenciones: ingreso de la posición, no trade nuevo
+    print("Processing dividend income...")
+    income_rows = merge_item_counts(SCHWAB_DIR, process_income_rows)
+    applied_income, orphan_income = apply_dividends(all_closed_trades, income_rows)
+    print(f"  Dividends applied to positions: {applied_income}")
+    for symbol, date, amount in orphan_income:
+        print(f"  ⚠️ {symbol} {date.date()} {amount:+.2f}: sin posición abierta que lo contenga")
+
+    # Posiciones abiertas -> vista Flotante (no entran en las métricas)
+    open_lots = open_execution_lots + open_das_lots + open_tos_lots + open_generic_lots
+
+    transferred = collections.Counter()
+    for symbol, qty in merge_item_counts(SCHWAB_DIR, process_transfers):
+        transferred[symbol] += qty
+    open_lots, transfer_lots = drop_transfer_lots(open_lots, transferred)
+    for lot in transfer_lots:
+        print(f"  ⚠️ {lot.symbol} {lot.date.date()}: venta sin compra, viene de un traspaso (no se cuenta como corta)")
+
+    open_lots, expired_trades = close_expired_options(open_lots, datetime.datetime.now())
+    if expired_trades:
+        print(f"Options expired without a close row: {len(expired_trades)}")
+        all_closed_trades.extend(expired_trades)
+
+    floating_positions = build_floating_positions(open_lots)
 
     # Apply saved tags from tags.json
     saved_tags = load_tags()
@@ -4843,31 +5647,49 @@ def main() -> None:
     print(f"Total expense days after deduplication: {len(expenses_data)}.")
 
     print("Generating report...")
-    # Cargar posiciones flotantes (abiertas) para mostrarlas aparte
-    JOURNAL_PATH = os.path.join(BASE_DIR, "data", "trading_journal.parquet")
-    floating_data = {"total": 0, "positions": []}
-    if os.path.exists(JOURNAL_PATH):
+    # Posiciones abiertas del journal (parquet). Las de los CSVs ya vienen de
+    # los lotes que el FIFO no cerró.
+    if os.path.exists(JOURNAL_FILE):
         try:
             import pandas as _pd
 
-            _df = _pd.read_parquet(JOURNAL_PATH)
+            _df = _pd.read_parquet(JOURNAL_FILE)
             _open = _df[_df["Status"] == "ABIERTO"]
-            # Filtrar opciones o posiciones que parezcan opciones (VZIO symbol raro)
-            _open = _open[~_open["Symbol"].str.contains(r"[A-Z]+\s+\d+[CP]", na=False)]
-            if len(_open) > 0:
-                floating_data["total"] = _open["Net_USD"].abs().sum()
-                for _, r in _open.iterrows():
-                    floating_data["positions"].append(
-                        {
-                            "symbol": r["Symbol"],
-                            "date": str(r["Date"]),
-                            "qty": str(int(abs(float(r["Qty"])))),
-                            "price": round(float(r["Price"]), 2),
-                            "invested": round(abs(float(r["Net_USD"])), 2),
-                        }
-                    )
+            for _, r in _open.iterrows():
+                symbol = str(r["Symbol"]).strip()
+
+                # Una opción vencida no puede seguir abierta, aunque el journal
+                # la marque ABIERTO porque nunca registró el vencimiento.
+                expiry = parse_occ_expiry(symbol)
+                if expiry is not None and expiry < datetime.datetime.now():
+                    print(f"  ⚠️ {symbol}: marcada ABIERTO en el journal pero venció el {expiry.date()}")
+                    continue
+
+                net_usd = float(r["Net_USD"])
+                qty = int(abs(float(r["Qty"])))
+                price = round(float(r["Price"]), 2)
+                multiplier = detect_multiplier(symbol)
+                is_long = net_usd < 0
+                floating_positions.append(
+                    {
+                        "symbol": symbol,
+                        "direction": "Long" if is_long else "Short",
+                        "date": str(r["Date"]),
+                        "qty": qty,
+                        "price": price,
+                        # El journal de IBKR cotiza en libras; Net_USD ya viene
+                        # convertido, por eso el invertido es en dólares.
+                        "currency": "GBP",
+                        "multiplier": int(multiplier),
+                        "invested": round(abs(net_usd), 2),
+                        "notional": round(qty * (parse_option_strike(symbol) or price) * multiplier, 2),
+                    }
+                )
         except Exception as e:
-            print(f"  ⚠️ Error cargando flotantes: {e}")
+            print(f"  ⚠️ Error cargando flotantes del journal: {e}")
+
+    floating_data = summarize_floating(floating_positions)
+    print(f"Floating positions: {len(floating_data['positions'])}")
 
     html_content = generate_html_report(all_closed_trades, expenses_data, floating_positions=floating_data)
     try:

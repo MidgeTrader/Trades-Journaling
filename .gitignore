@@ -26,6 +26,12 @@ data/trading_report_backup_*.html
 data/transferencia_*.html
 data/tags.json
 
+# Copias de seguridad (incluye el .parquet del journal)
+*.bak
+*.bak-*
+*.orig
+*.rej
+
 # Cache de Python
 __pycache__/
 src/__pycache__/

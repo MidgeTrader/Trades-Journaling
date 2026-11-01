@@ -1,0 +1,4 @@
+{
+  "_nota": "Multiplicador manual por simbolo. Solo para contratos ajustados por split/merger o indices con multiplicador distinto de 100. El simbolo debe coincidir exactamente con el del broker. Ejemplo: {\"simbolos\": {\"XYZ 01/16/2026 10.00 C\": 10}}",
+  "simbolos": {}
+}

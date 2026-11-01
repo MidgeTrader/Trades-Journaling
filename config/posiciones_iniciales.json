@@ -1,0 +1,4 @@
+{
+  "_nota": "Posiciones arrastradas de antes del primer CSV. Sin la compra declarada, una venta parece una posicion corta inventada. Formato de fecha: YYYY-MM-DD. Vacia la lista si todas las compras estan ya en los CSV.",
+  "posiciones": []
+}
