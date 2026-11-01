@@ -55,3 +55,20 @@ Luego ejecuta los siguientes comandos uno por uno:
 git config --global user.name "Tu Nombre"
 git config --global user.email "tu@email.com"
 ```
+
+---
+
+### 7. Activar la barrera de datos personales
+
+Este repositorio es público. Todo lo que entra en un commit se queda en el
+historial y viaja con cualquier copia, clon o fork que alguien haga después:
+borrarlo más tarde no recupera esas copias.
+
+El hook `.githooks/pre-commit` bloquea commits que metan correos, rutas locales
+del sistema o ids de carpeta de Drive. Hay que activarlo una vez por clon:
+
+```bash
+git config core.hooksPath .githooks
+```
+
+Ese tipo de datos va en `.env`, que está en `.gitignore` y nunca se sube.

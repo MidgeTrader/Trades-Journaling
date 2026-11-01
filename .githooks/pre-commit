@@ -1,0 +1,27 @@
+#!/bin/sh
+# Barrera pre-commit: este repo es público.
+#
+# Lo que entra en un commit se queda en el historial y se va con cualquier
+# copia, clon o fork que alguien haga después. Borrarlo luego no recupera las
+# copias. Por eso se corta en el origen: correos, rutas locales del sistema e
+# ids de carpeta de Drive no se suben, van a .env (ignorado).
+#
+# Activar una vez por clon:
+#   git config core.hooksPath .githooks
+#
+# Saltarla en un caso justificado:
+#   git commit --no-verify
+
+PATRONES='@gmail\.com|/Users/[A-Za-z0-9]|GoogleDrive-|C:\\Users\\[a-z]|drive-root-folder-id "?[A-Za-z0-9]'
+
+# El propio hook queda fuera del escaneo: contiene los patrones literalmente.
+if git diff --cached --diff-filter=ACM -U0 -- . ':(exclude).githooks/pre-commit' |
+    grep -nE "^\+.*($PATRONES)"; then
+    echo ""
+    echo "❌ Commit bloqueado: el cambio contiene un dato personal."
+    echo "   Correo, ruta local, ruta de Drive o id de carpeta."
+    echo "   Muévelo a .env (ignorado) o quítalo del cambio."
+    exit 1
+fi
+
+exit 0
