@@ -18,7 +18,10 @@ data/Reports_MetaTrader/
 data/Reports_DAS/
 data/Reports_TOS/
 data/Reports_Generic/
-data/Reports_Screenshots/
+# Sin barra final a propósito: la ruta local es un symlink a Google Drive y su
+# destino contiene el correo personal. El repo es público, así que se ignora
+# en ambas formas (enlace o directorio real).
+data/Reports_Screenshots
 
 # Archivos generados
 data/trading_report.html
