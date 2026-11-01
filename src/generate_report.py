@@ -1412,11 +1412,33 @@ def process_transfers(filepath: str) -> list[tuple[str, int]]:
     return rows
 
 
+def _split_lot(lot: Trade, quantity: int) -> Trade:
+    """Devuelve una copia del lote con otra cantidad, conservando la unidad de coste.
+
+    Args:
+        lot: Lote original (no se modifica).
+        quantity: Cantidad de la copia.
+
+    Returns:
+        Copia del lote con la cantidad pedida y sus fees proporcionales.
+    """
+    unit_fee = getattr(lot, "unit_fee", lot.fees / lot.quantity if lot.quantity else 0.0)
+    part = copy.copy(lot)
+    part.quantity = quantity
+    part.unit_fee = unit_fee
+    part.fees = unit_fee * quantity
+    return part
+
+
 def drop_transfer_lots(open_lots: list[Trade], transferred: dict[str, int]) -> tuple[list[Trade], list[Trade]]:
     """Separa los lotes abiertos que un traspaso de entrada explica.
 
     Una venta sin compra suele venir de títulos traspasados: contarla como
     posición corta sería inventar una exposición que no existe.
+
+    La cantidad traspasada se consume lote a lote y se copia antes de tocarla.
+    Comparar cada lote contra el total del símbolo dejaba pasar una segunda
+    venta huérfana que ya no tenía títulos detrás.
 
     Args:
         open_lots: Lotes que el FIFO no cerró.
@@ -1427,10 +1449,23 @@ def drop_transfer_lots(open_lots: list[Trade], transferred: dict[str, int]) -> t
     """
     keep: list[Trade] = []
     explained: list[Trade] = []
+    remaining = dict(transferred)
 
     for lot in open_lots:
-        is_unbacked_sale = lot.action == "Sell" and transferred.get(lot.symbol, 0) >= lot.quantity
-        (explained if is_unbacked_sale else keep).append(lot)
+        pool = remaining.get(lot.symbol, 0)
+        if lot.action != "Sell" or pool <= 0:
+            keep.append(lot)
+            continue
+
+        covered = min(pool, lot.quantity)
+        remaining[lot.symbol] = pool - covered
+
+        if covered < lot.quantity:
+            # Traspaso parcial: solo la parte cubierta deja de ser una corta.
+            keep.append(_split_lot(lot, lot.quantity - covered))
+            explained.append(_split_lot(lot, covered))
+        else:
+            explained.append(lot)
 
     return keep, explained
 
